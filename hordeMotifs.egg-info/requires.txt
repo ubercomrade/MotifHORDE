@@ -1,5 +1,0 @@
-numpy<2.0,>=1.26
-numba~=0.60
-scipy>=1.14.1
-pandas>=2.2.3
-joblib>=1.5.3

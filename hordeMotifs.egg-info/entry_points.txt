@@ -1,2 +1,0 @@
-[console_scripts]
-hordeMotifs = hordemotifs.cli:main_cli
