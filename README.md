@@ -12,6 +12,19 @@ The runtime model API uses the `mimosa` style:
 
 Legacy model classes and ragged payloads are removed from production code.
 
+## Installation
+
+For command-line use with MEME/STREME, create a conda or mamba environment:
+
+```bash
+mamba env create -f environment.yml
+conda activate hordemotifs
+```
+
+The environment installs MEME Suite from Bioconda, so `meme` and `streme` are
+available through `PATH`. Dimont and SlimDimont JAR files are bundled with the
+Python package.
+
 ## Python API
 
 ```python
@@ -34,7 +47,7 @@ hordeMotifs peaks.fa background.fa promoters.fa output/ -t bamm -l 10-14-2 -o 1-
 hordeMotifs peaks.fa background.fa promoters.fa output/ -t sitega -l 10-16-2 --lpd 10-40-10
 ```
 
-Supported discovery tools are `streme`, `bamm`, and `sitega`.
+Supported discovery tools are `streme`, `meme`, `bamm`, `dimont`, `slim`, and `sitega`.
 Supported comparators are `tomtom` and `continuous`.
 Continuous profile metrics are `co`, `co_rowwise`, `dice`, `dice_rowwise`, and `cosine`.
 

@@ -175,3 +175,7 @@ Makefile
 ################################################################################
 # End of .gitignore
 ################################################################################
+
+# Package data bundled into wheels/sdists.
+!src/hordemotifs/bin/
+!src/hordemotifs/bin/**

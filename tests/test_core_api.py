@@ -5,7 +5,12 @@ import numpy as np
 from hordemotifs.batches import make_sequence_batch
 from hordemotifs.comparison import TomtomComparator, UniversalMotifComparator
 from hordemotifs.evaluation import PerformanceEvaluator
-from hordemotifs.functions import batch_all_scores, batch_all_scores_strands, build_score_log_tail_table
+from hordemotifs.functions import (
+    batch_all_scores,
+    batch_all_scores_strands,
+    build_score_log_tail_table,
+    lookup_score_for_tail_probability,
+)
 from hordemotifs.io import read_fasta, write_fasta
 from hordemotifs.models import (
     GenericModel,
@@ -39,6 +44,18 @@ def test_read_model_and_scan(sample_meme, sequence_batch):
     scores = scan_model(model, sequence_batch, strand="best")
     assert scores["values"].shape[0] == len(sequence_batch["lengths"])
     assert np.any(scores["mask"])
+
+
+def test_read_meme_accepts_compact_width_header(tmp_path, test_pfm):
+    path = tmp_path / "compact.meme"
+    with open(path, "w") as handle:
+        handle.write("MEME version 4\n\n")
+        handle.write("MOTIF Compact\n")
+        handle.write("letter-probability matrix: alength= 4 w=6 nsites= 20 E= 0\n")
+        np.savetxt(handle, test_pfm.T, fmt="%.6f")
+
+    model = read_model(path, "pwm")
+    assert model.length == test_pfm.shape[1]
 
 
 def test_batch_scoring_kernels(pwm_model, sequence_batch):
@@ -92,3 +109,9 @@ def test_comparator_wrappers(pwm_model, sequence_batch):
 def test_score_tail_table_handles_empty_input():
     table = build_score_log_tail_table(np.array([], dtype=np.float32))
     assert table.shape == (1, 2)
+
+
+def test_lookup_score_for_strict_tail_probability_uses_strictest_cutoff():
+    table = build_score_log_tail_table(np.array([10.0, 9.0, 8.0, 7.0], dtype=np.float32))
+    score = lookup_score_for_tail_probability(table, 0.01)
+    assert score == 10.0

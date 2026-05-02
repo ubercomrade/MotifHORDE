@@ -1,0 +1,10 @@
+name: hordemotifs
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python>=3.12
+  - meme
+  - pip
+  - pip:
+      - hordemotifs
