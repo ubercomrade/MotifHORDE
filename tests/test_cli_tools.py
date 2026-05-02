@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from hordemotifs.cli import create_arg_parser, setup_discovery_params, setup_discovery_tool
-from hordemotifs.discovery import (
+from motifhorde.cli import create_arg_parser, setup_discovery_params, setup_discovery_tool
+from motifhorde.discovery import (
     BammDiscoveryTool,
     DimontDiscoveryTool,
     MemeDiscoveryTool,

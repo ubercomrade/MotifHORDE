@@ -11,8 +11,8 @@ from typing import TypedDict
 
 import numpy as np
 
-from hordemotifs.batches import SCORE_PADDING, ProfileBundle, pack_profile_bundle
-from hordemotifs.models import GenericModel
+from motifhorde.batches import SCORE_PADDING, ProfileBundle, pack_profile_bundle
+from motifhorde.models import GenericModel
 
 CACHE_VERSION = "v8"
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 import subprocess
 
-from hordemotifs.discovery import SlimDiscoveryTool, _build_slim_args
-from hordemotifs.models import GenericModel
+from motifhorde.discovery import SlimDiscoveryTool, _build_slim_args
+from motifhorde.models import GenericModel
 
 
 def test_build_slim_args_contains_jstacs_parameters():
@@ -48,8 +48,8 @@ def test_slim_discovery_writes_fasta_and_reads_generic_model(monkeypatch, tmp_pa
     def fake_read_model(path, model_type, **kwargs):
         return GenericModel(model_type, "raw", [[[0.0]]], 1, {"kmer": 1})
 
-    monkeypatch.setattr("hordemotifs.discovery.run_checked", fake_run_checked)
-    monkeypatch.setattr("hordemotifs.discovery.read_model", fake_read_model)
+    monkeypatch.setattr("motifhorde.discovery.run_checked", fake_run_checked)
+    monkeypatch.setattr("motifhorde.discovery.read_model", fake_read_model)
 
     motifs = SlimDiscoveryTool(jar_path=os.fspath(jar_path)).discover(
         os.fspath(foreground),

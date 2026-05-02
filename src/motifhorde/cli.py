@@ -1,5 +1,5 @@
 """
-Command-line interface for HordeMotifs pipeline.
+Command-line interface for MotifHORDE pipeline.
 """
 import os
 import sys
@@ -7,7 +7,7 @@ import shutil
 import argparse
 from typing import Dict, List, Any
 
-from hordemotifs.external import (
+from motifhorde.external import (
     DEFAULT_BAMM_COMMAND,
     DEFAULT_DIMONT_JAR,
     DEFAULT_MEME_COMMAND,
@@ -16,8 +16,8 @@ from hordemotifs.external import (
     resolve_command,
     resolve_existing_path,
 )
-from hordemotifs.pipeline import DeNovoPipeline
-from hordemotifs.discovery import (
+from motifhorde.pipeline import DeNovoPipeline
+from motifhorde.discovery import (
     BammDiscoveryTool,
     DimontDiscoveryTool,
     MemeDiscoveryTool,
@@ -25,8 +25,8 @@ from hordemotifs.discovery import (
     SlimDiscoveryTool,
     StremeDiscoveryTool,
 )
-from hordemotifs.evaluation import PerformanceEvaluator
-from hordemotifs.comparison import (
+from motifhorde.evaluation import PerformanceEvaluator
+from motifhorde.comparison import (
     UniversalMotifComparator,
     TomtomComparator,
 )
@@ -67,7 +67,7 @@ def parse_range(s: str) -> List[int]:
 
 
 def create_arg_parser() -> argparse.ArgumentParser:
-    """Create and configure the command-line argument parser for HordeMotifs.
+    """Create and configure the command-line argument parser for MotifHORDE.
     
     Sets up all required and optional arguments for the motif discovery pipeline,
     including input files, discovery tool options, evaluation parameters, and
@@ -76,33 +76,33 @@ def create_arg_parser() -> argparse.ArgumentParser:
     Returns
     -------
     argparse.ArgumentParser
-        Configured argument parser with all HordeMotifs options
+        Configured argument parser with all MotifHORDE options
     """
     parser = argparse.ArgumentParser(
-        description='HordeMotifs: De novo motif discovery pipeline with odd/even bootstrap validation',
+        description='MotifHORDE: De novo motif discovery pipeline with odd/even bootstrap validation',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
     Examples:
       # Basic PWM discovery with STREME
-      hordeMotifs peaks.fa background.fa promoters.fa output/ -t streme -l 8-20-4
+      motifhorde peaks.fa background.fa promoters.fa output/ -t streme -l 8-20-4
     
       # Markov model-based motifs with different orders
-      hordeMotifs peaks.fa bg.fa promoters.fa output/ -t bamm -l 10-14-2 -o 1-4-1
+      motifhorde peaks.fa bg.fa promoters.fa output/ -t bamm -l 10-14-2 -o 1-4-1
     
       # SiteGA with custom LPD range
-      hordeMotifs peaks.fa bg.fa promoters.fa output/ -t sitega -l 10-16-2 --lpd 10-40-10
+      motifhorde peaks.fa bg.fa promoters.fa output/ -t sitega -l 10-16-2 --lpd 10-40-10
     
       # Single length value (when testing specific length)
-      hordeMotifs peaks.fa bg.fa promoters.fa output/ -t streme -l 12
+      motifhorde peaks.fa bg.fa promoters.fa output/ -t streme -l 12
     
       # Multiple specific values using comma-separated format
-      hordeMotifs peaks.fa bg.fa promoters.fa output/ -t bamm -l 10,12,14 -o 1,2,3
+      motifhorde peaks.fa bg.fa promoters.fa output/ -t bamm -l 10,12,14 -o 1,2,3
     
       # Continuous profile comparison
-      hordeMotifs peaks.fa bg.fa promoters.fa output/ -c continuous --c-metric co --c-perm 5000
+      motifhorde peaks.fa bg.fa promoters.fa output/ -c continuous --c-metric co --c-perm 5000
     
       # TomTom comparison with custom threshold
-      hordeMotifs peaks.fa bg.fa promoters.fa output/ -c tomtom --tomtom-pval 0.0001 --tomtom-metric pcc
+      motifhorde peaks.fa bg.fa promoters.fa output/ -c tomtom --tomtom-pval 0.0001 --tomtom-metric pcc
     """
     )
 
@@ -574,7 +574,7 @@ def setup_discovery_params(args) -> Dict[str, List[Any]]:
 
 
 def main_cli():
-    """Main command-line interface entry point for the HordeMotifs pipeline.
+    """Main command-line interface entry point for the MotifHORDE pipeline.
     
     Orchestrates the complete motif discovery pipeline by parsing command-line
     arguments, validating inputs, setting up pipeline components, and executing
@@ -611,7 +611,7 @@ def main_cli():
     # Setup pipeline components
     if args.verbose:
         print("=" * 60)
-        print("HordeMotifs De Novo Pipeline")
+        print("MotifHORDE De Novo Pipeline")
         print("=" * 60)
         print(f"Discovery tool: {args.tool}")
         print(f"Comparator: {args.comparator}")

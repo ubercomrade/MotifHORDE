@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 from numba import njit
 
-from hordemotifs.batches import (
+from motifhorde.batches import (
     SCORE_PADDING,
     batch_with_values,
     flatten_profile_bundle,

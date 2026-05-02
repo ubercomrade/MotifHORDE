@@ -1,7 +1,7 @@
 [project]
-name = "hordeMotifs"
+name = "motifhorde"
 version = "0.1.0"
-description = ""
+description = "Motif Harmonized Orchestration for Robust Discovery and Evaluation"
 authors = [{name = "Anton Tsukanov", email = "tsukanov@bionet.nsc.ru"}]
 readme = "README.md"
 requires-python = ">=3.12"
@@ -20,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-hordeMotifs = "hordemotifs.cli:main_cli"
+motifhorde = "motifhorde.cli:main_cli"
 
 [build-system]
 requires = ["setuptools", "wheel"]
@@ -30,4 +30,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-hordemotifs = ["bin/*"]
+motifhorde = ["bin/*"]

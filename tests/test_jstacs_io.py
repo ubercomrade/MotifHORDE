@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hordemotifs.io import write_jstacs_fasta
+from motifhorde.io import write_jstacs_fasta
 
 
 def test_write_jstacs_fasta_empty(tmp_path):

@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from hordemotifs.external import resolve_command, resolve_existing_path, run_checked
+from motifhorde.external import resolve_command, resolve_existing_path, run_checked
 
 
 def test_resolve_command_prefers_env(monkeypatch, tmp_path):

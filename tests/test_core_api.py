@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from hordemotifs.batches import make_sequence_batch
-from hordemotifs.comparison import TomtomComparator, UniversalMotifComparator
-from hordemotifs.evaluation import PerformanceEvaluator
-from hordemotifs.functions import (
+from motifhorde.batches import make_sequence_batch
+from motifhorde.comparison import TomtomComparator, UniversalMotifComparator
+from motifhorde.evaluation import PerformanceEvaluator
+from motifhorde.functions import (
     batch_all_scores,
     batch_all_scores_strands,
     build_score_log_tail_table,
     lookup_score_for_tail_probability,
 )
-from hordemotifs.io import read_fasta, write_fasta
-from hordemotifs.models import (
+from motifhorde.io import read_fasta, write_fasta
+from motifhorde.models import (
     GenericModel,
     calculate_threshold_table,
     get_frequencies,

@@ -1,4 +1,4 @@
-uv run hordeMotifs \
+uv run motifhorde \
  ./PEAKS035260_GATA2_O09100_MACS2.fa \
  ./PEAKS035260_GATA2_O09100_MACS2_gb.fa \
 /home/anton/Documents/genomes/mm/mm10.ensembl.promoters.fa \

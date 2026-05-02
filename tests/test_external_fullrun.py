@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from hordemotifs.external import (
+from motifhorde.external import (
     DEFAULT_DIMONT_JAR,
     DEFAULT_MEME_COMMAND,
     DEFAULT_SLIM_JAR,
@@ -22,7 +22,7 @@ def _run_cli(tool: str, output_dir, foreground: str, background: str, promoters:
         [
             "uv",
             "run",
-            "hordeMotifs",
+            "motifhorde",
             foreground,
             background,
             promoters,

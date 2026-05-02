@@ -177,5 +177,5 @@ Makefile
 ################################################################################
 
 # Package data bundled into wheels/sdists.
-!src/hordemotifs/bin/
-!src/hordemotifs/bin/**
+!src/motifhorde/bin/
+!src/motifhorde/bin/**

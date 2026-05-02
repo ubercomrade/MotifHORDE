@@ -5,9 +5,9 @@ import os
 import numpy as np
 import pytest
 
-from hordemotifs.batches import make_sequence_batch
-from hordemotifs.functions import pfm_to_pwm
-from hordemotifs.models import GenericModel
+from motifhorde.batches import make_sequence_batch
+from motifhorde.functions import pfm_to_pwm
+from motifhorde.models import GenericModel
 
 
 @pytest.fixture

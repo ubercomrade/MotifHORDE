@@ -10,7 +10,7 @@ from joblib import Parallel, delayed
 from numba import njit
 from scipy.ndimage import convolve1d
 
-from hordemotifs.batches import (
+from motifhorde.batches import (
     MINUS_STRAND,
     PLUS_STRAND,
     SCORE_PADDING,
@@ -19,8 +19,8 @@ from hordemotifs.batches import (
     pack_profile_bundle,
     profile_view,
 )
-from hordemotifs.cache import ProfileCacheSpec, fingerprint_batch, fingerprint_model, load_profile_cache, store_profile_cache
-from hordemotifs.functions import (
+from motifhorde.cache import ProfileCacheSpec, fingerprint_batch, fingerprint_model, load_profile_cache, store_profile_cache
+from motifhorde.functions import (
     apply_score_log_tail_table_to_profile_bundle,
     build_score_log_tail_table,
     calc_co,
@@ -31,12 +31,12 @@ from hordemotifs.functions import (
     rowwise_dice,
     scores_to_empirical_log_tail_bundle,
 )
-from hordemotifs.models import (
+from motifhorde.models import (
     GenericModel,
     get_pfm,
     scan_model_strands,
 )
-from hordemotifs.validation import (
+from motifhorde.validation import (
     validate_cache_mode,
     validate_kernel_size_range,
     validate_non_negative,
@@ -1282,7 +1282,7 @@ def compare_one_to_many(
 
 
 class GeneralMotifComparator:
-    """Small horde-facing comparator interface."""
+    """Small pipeline-facing comparator interface."""
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -1292,7 +1292,7 @@ class GeneralMotifComparator:
 
 
 class TomtomComparator(GeneralMotifComparator):
-    """Matrix comparator compatible with the horde pipeline naming."""
+    """Matrix comparator compatible with the pipeline naming."""
 
     def __init__(
         self,

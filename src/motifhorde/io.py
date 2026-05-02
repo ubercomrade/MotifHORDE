@@ -12,7 +12,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from hordemotifs.batches import make_score_batch, make_sequence_batch, row_values
+from motifhorde.batches import make_score_batch, make_sequence_batch, row_values
 
 _JSTACS_NUMERIC_RE = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?")
 _MEME_WIDTH_RE = re.compile(r"\bw\s*=\s*(\d+)")

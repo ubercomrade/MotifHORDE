@@ -11,7 +11,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from hordemotifs.batches import (
+from motifhorde.batches import (
     MINUS_STRAND,
     PLUS_STRAND,
     SCORE_PADDING,
@@ -20,7 +20,7 @@ from hordemotifs.batches import (
     profile_row_values,
     row_values,
 )
-from hordemotifs.functions import (
+from motifhorde.functions import (
     batch_all_scores,
     batch_all_scores_strands,
     build_score_log_tail_table,
@@ -29,7 +29,7 @@ from hordemotifs.functions import (
     pfm_to_pwm,
     scores_to_empirical_log_tail,
 )
-from hordemotifs.io import (
+from motifhorde.io import (
     parse_file_content,
     read_bamm,
     read_dimont,
@@ -41,7 +41,7 @@ from hordemotifs.io import (
     write_pfm,
     write_sitega,
 )
-from hordemotifs.validation import validate_site_mode
+from motifhorde.validation import validate_site_mode
 
 StrandMode = Literal["best", "+", "-"]
 _SEQ_DECODER = np.array(["A", "C", "G", "T", "N"], dtype="U1")
