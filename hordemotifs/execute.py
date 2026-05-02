@@ -73,59 +73,6 @@ def run_tomtom(motifs_1, motifs_2):
     return table
 
 
-def run_motali_pwm_pwm(fasta_path, motif_1, motif_2, dist_1, dist_2,
-                       overlap_path, all_path, sta_path):
-    """Execute Motali for PWM-PWM motif comparison.
-    
-    This function runs the Motali external tool to perform pairwise comparison
-    between Position Weight Matrices (PWMs) using specified distance metrics
-    and outputs the similarity score.
-    
-    Parameters
-    ----------
-    fasta_path : str
-        Path to the FASTA file containing sequences for analysis
-    motif_1 : str
-        Path to the first PWM motif file
-    motif_2 : str
-        Path to the second PWM motif file
-    dist_1 : str
-        First distance metric/method to use for comparison
-    dist_2 : str
-        Second distance metric/method to use for comparison
-    overlap_path : str
-        Path where overlap results will be saved
-    all_path : str
-        Path where aggregate results will be saved
-    sta_path : str
-        Path where statistical results will be saved
-    
-    Returns
-    -------
-    float
-        Similarity score calculated by Motali for the motif comparison
-    """
-    args = ['mco_prc.exe',
-            fasta_path,
-            'pwm', 'pwm',
-            motif_1,
-            motif_2,
-            dist_1,
-            dist_2,
-            '50', '0.002',
-            'hist_pass', '1',
-            'prc_pass', '1',
-            overlap_path,
-            all_path,
-            sta_path]
-    result = subprocess.run(args, shell=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"Motali failed with return code {result.returncode}: {result.stderr}")
-    with open(all_path) as file:
-       score = float(file.readline().strip())
-    return score
-
-
 def run_sitega(tmp_dir, motif_length, number_of_lpds, number_of_motifs):
     """Execute SiteGA for de novo motif discovery using genetic algorithm.
     

@@ -7,17 +7,28 @@ import shutil
 import argparse
 from typing import Dict, List, Any
 
+from hordemotifs.external import (
+    DEFAULT_BAMM_COMMAND,
+    DEFAULT_DIMONT_JAR,
+    DEFAULT_MEME_COMMAND,
+    DEFAULT_SLIM_JAR,
+    DEFAULT_STREME_COMMAND,
+    resolve_command,
+    resolve_existing_path,
+)
 from hordemotifs.pipeline import DeNovoPipeline
 from hordemotifs.discovery import (
-    StremeDiscoveryTool,
     BammDiscoveryTool,
-    SitegaDiscoveryTool
+    DimontDiscoveryTool,
+    MemeDiscoveryTool,
+    SitegaDiscoveryTool,
+    SlimDiscoveryTool,
+    StremeDiscoveryTool,
 )
 from hordemotifs.evaluation import PerformanceEvaluator
 from hordemotifs.comparison import (
     UniversalMotifComparator,
     TomtomComparator,
-    MotaliComparator
 )
 
 
@@ -73,25 +84,25 @@ def create_arg_parser() -> argparse.ArgumentParser:
         epilog="""
     Examples:
       # Basic PWM discovery with STREME
-      hordemotifs peaks.fa background.fa promoters.fa output/ -t streme -l 8-20-4
+      hordeMotifs peaks.fa background.fa promoters.fa output/ -t streme -l 8-20-4
     
       # Markov model-based motifs with different orders
-      hordemotifs peaks.fa bg.fa promoters.fa output/ -t bamm -l 10-14-2 -o 1-4-1
+      hordeMotifs peaks.fa bg.fa promoters.fa output/ -t bamm -l 10-14-2 -o 1-4-1
     
       # SiteGA with custom LPD range
-      hordemotifs peaks.fa bg.fa promoters.fa output/ -t sitega -l 10-16-2 --lpd 10-40-10
+      hordeMotifs peaks.fa bg.fa promoters.fa output/ -t sitega -l 10-16-2 --lpd 10-40-10
     
       # Single length value (when testing specific length)
-      hordemotifs peaks.fa bg.fa promoters.fa output/ -t streme -l 12
+      hordeMotifs peaks.fa bg.fa promoters.fa output/ -t streme -l 12
     
       # Multiple specific values using comma-separated format
-      hordemotifs peaks.fa bg.fa promoters.fa output/ -t bamm -l 10,12,14 -o 1,2,3
+      hordeMotifs peaks.fa bg.fa promoters.fa output/ -t bamm -l 10,12,14 -o 1,2,3
     
-      # Custom comparison with Jaccard metric
-      hordemotifs peaks.fa bg.fa promoters.fa output/ -c jaccard --c-metric jo --c-perm 5000
+      # Continuous profile comparison
+      hordeMotifs peaks.fa bg.fa promoters.fa output/ -c continuous --c-metric co --c-perm 5000
     
       # TomTom comparison with custom threshold
-      hordemotifs peaks.fa bg.fa promoters.fa output/ -c tomtom --tomtom-pval 0.0001 --tomtom-metric pcc
+      hordeMotifs peaks.fa bg.fa promoters.fa output/ -c tomtom --tomtom-pval 0.0001 --tomtom-metric pcc
     """
     )
 
@@ -118,7 +129,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
     discovery = parser.add_argument_group('Motif discovery options')
     discovery.add_argument(
         '-t', '--tool',
-        choices=['streme', 'bamm', 'sitega'],
+        choices=['streme', 'meme', 'bamm', 'dimont', 'slim', 'sitega'],
         default='streme',
         help='De novo motif discovery tool to use (default: %(default)s)'
     )
@@ -146,6 +157,29 @@ def create_arg_parser() -> argparse.ArgumentParser:
         default='10-40-10',
         help='Range of locally positioned dinucleotide (LPD) distances for SiteGA. Format: \'start-end-step\', comma-separated list, or a single value (default: %(default)s)'
     )
+    discovery.add_argument('--meme-command', default=None, help='MEME executable path')
+    discovery.add_argument('--streme-command', default=None, help='STREME executable path')
+    discovery.add_argument('--bamm-command', default=None, help='BaMMmotif executable path')
+    discovery.add_argument('--dimont-jar', default=None, help='Dimont jar path')
+    discovery.add_argument('--slim-jar', default=None, help='SlimDimont jar path')
+    discovery.add_argument('--java-command', default='java', help='Java executable path or command')
+    discovery.add_argument('--java-xmx', default='4G', help='Java heap size for Jstacs tools')
+    discovery.add_argument('--meme-objfun', default='classic', help='MEME objective function')
+    discovery.add_argument('--meme-mod', default='zoops', help='MEME distribution model')
+    discovery.add_argument('--meme-minsites', type=int, default=None, help='MEME minimum number of sites')
+    discovery.add_argument('--meme-maxsites', type=int, default=None, help='MEME maximum number of sites')
+    discovery.add_argument('--meme-seed', type=int, default=None, help='MEME random seed')
+    discovery.add_argument('--meme-p', type=int, default=None, help='MEME thread count')
+    discovery.add_argument('--jstacs-threads', type=int, default=None, help='Jstacs thread count')
+    discovery.add_argument('--jstacs-position-tag', default='position', help='Jstacs FASTA position annotation tag')
+    discovery.add_argument('--jstacs-value-tag', default='value', help='Jstacs FASTA signal annotation tag')
+    discovery.add_argument('--jstacs-bg-order', type=int, default=-1, help='Jstacs background Markov order')
+    discovery.add_argument('--dimont-motif-order', type=int, default=0, help='Dimont motif Markov order')
+    discovery.add_argument('--dimont-ess', type=float, default=4.0, help='Dimont equivalent sample size')
+    discovery.add_argument('--dimont-starts', type=int, default=20, help='Dimont optimization starts')
+    discovery.add_argument('--slim-motif-order', type=int, default=-5, help='SlimDimont motif order or negative distance')
+    discovery.add_argument('--slim-starts', type=int, default=20, help='SlimDimont optimization starts')
+    discovery.add_argument('--slim-modify', action=argparse.BooleanOptionalAction, default=True, help='Enable SlimDimont shift adjustment')
 
     # ========== Evaluation options ==========
     evaluation = parser.add_argument_group('Evaluation options')
@@ -172,7 +206,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
     comparison = parser.add_argument_group('Motif comparison options')
     comparison.add_argument(
         '-c', '--comparator',
-        choices=['tomtom', 'continuous', 'motali'],
+        choices=['tomtom', 'continuous'],
         default='tomtom',
         help='Method used for comparing discovered motifs (default: %(default)s)'
     )
@@ -211,15 +245,15 @@ def create_arg_parser() -> argparse.ArgumentParser:
     tomtom.add_argument(
         '--pfm-mode',
         action='store_true',
-        help='If set, a Position Frequency Matrix (PFM) is derived for the model motifs by scanning sequences and constructing the PFM based on the top 5`%` of predicted binding sites'
+        help='If set, derive PFMs by scanning sequences and using the top 5%% of predicted binding sites'
     )
 
     continuous = parser.add_argument_group('Continuous comparator options')
     continuous.add_argument(
         '--c-metric',
-        choices=['сj', 'co', 'corr'],
-        default='сj',
-        help='Metric for comparing motif models. Choices: cj (Continuous Jaccard), co (Continuous Overlap), corr (Pearson Correlation). (default: %(default)s)'
+        choices=['co', 'co_rowwise', 'dice', 'dice_rowwise', 'cosine'],
+        default='co',
+        help='Metric for comparing motif score profiles (default: %(default)s)'
     )
     continuous.add_argument(
         '--c-perm',
@@ -255,28 +289,19 @@ def create_arg_parser() -> argparse.ArgumentParser:
         '--min-kernel-size',
         type=int,
         default=3,
-        help='Minimum kernel size for convolution during surrogate generation. Used for `cj` and `co` options. (default: %(default)s)'
+        help='Minimum kernel size for convolution during surrogate generation (default: %(default)s)'
     )
     continuous.add_argument(
         '--max-kernel-size',
         type=int,
         default=11,
-        help='Maximum kernel size for convolution during surrogate generation. Used for `cj` and `co` options. (default: %(default)s)'
+        help='Maximum kernel size for convolution during surrogate generation (default: %(default)s)'
     )
     continuous.add_argument(
         '--c-jobs',
         type=int,
         default=-1,
-        help='Number of parallel jobs for comparisons. Used for `cj` and `co` options. Set to -1 to use all available cores (default: %(default)s)'
-    )
-
-    # Motali options
-    motali = parser.add_argument_group('Motali comparator options')
-    motali.add_argument(
-        '--motali-threshold',
-        type=float,
-        default=0.95,
-        help='Similarity threshold for Motali comparison (default: %(default)s)'
+        help='Number of parallel jobs for comparisons. Set to -1 to use all available cores (default: %(default)s)'
     )
 
     # ========== Other options ==========
@@ -296,7 +321,16 @@ def create_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def check_dependencies(tool: str) -> None:
+def _command_exists(command: str) -> bool:
+    return os.path.exists(command) or shutil.which(command) is not None
+
+
+def _dependency_error(message: str) -> None:
+    print(f"ERROR: {message}")
+    sys.exit(1)
+
+
+def check_dependencies(args) -> None:
     """Check if required external dependencies are available in the system PATH.
     
     Verifies the presence of external tools needed for motif discovery based on
@@ -312,21 +346,40 @@ def check_dependencies(tool: str) -> None:
     SystemExit
         If required dependencies are not found in the system PATH
     """
-    if tool == 'streme':
-        if shutil.which("streme") is None:
-            print("ERROR: STREME dependency missing. Please install MEME Suite from https://meme-suite.org/")
-            sys.exit(1)
-
-    elif tool == 'bamm':
-        if shutil.which("BaMMmotif") is None:
-            print("ERROR: BaMMmotif dependency missing. Please install BaMM from https://github.com/soedinglab/BaMMmotif")
-            sys.exit(1)
-
-    # Check Java for tools that need it
-    if tool in ['chipmunk']:
-        if shutil.which("java") is None:
-            print("ERROR: Java dependency missing. Please install Java from https://www.java.com/")
-            sys.exit(1)
+    if args.tool == 'streme':
+        command = args.streme_command or resolve_command("streme", DEFAULT_STREME_COMMAND, "HORDEMOTIFS_STREME_COMMAND")
+        if not _command_exists(command):
+            _dependency_error(f"STREME dependency missing: {command}")
+    elif args.tool == 'meme':
+        command = args.meme_command or resolve_command("meme", DEFAULT_MEME_COMMAND, "HORDEMOTIFS_MEME_COMMAND")
+        if not _command_exists(command):
+            _dependency_error(f"MEME dependency missing: {command}")
+    elif args.tool == 'bamm':
+        streme = args.streme_command or resolve_command("streme", DEFAULT_STREME_COMMAND, "HORDEMOTIFS_STREME_COMMAND")
+        bamm = args.bamm_command or resolve_command(DEFAULT_BAMM_COMMAND, DEFAULT_BAMM_COMMAND, "HORDEMOTIFS_BAMM_COMMAND")
+        if not _command_exists(streme):
+            _dependency_error(f"STREME dependency missing for BaMM initialization: {streme}")
+        if not _command_exists(bamm):
+            _dependency_error(f"BaMMmotif dependency missing: {bamm}")
+    elif args.tool == 'dimont':
+        java = resolve_command(args.java_command)
+        if not _command_exists(java):
+            _dependency_error(f"Java dependency missing: {java}")
+        try:
+            resolve_existing_path(args.dimont_jar, "HORDEMOTIFS_DIMONT_JAR", DEFAULT_DIMONT_JAR, "Dimont jar")
+        except FileNotFoundError as exc:
+            _dependency_error(str(exc))
+    elif args.tool == 'slim':
+        java = resolve_command(args.java_command)
+        if not _command_exists(java):
+            _dependency_error(f"Java dependency missing: {java}")
+        try:
+            resolve_existing_path(args.slim_jar, "HORDEMOTIFS_SLIM_JAR", DEFAULT_SLIM_JAR, "SlimDimont jar")
+        except FileNotFoundError as exc:
+            _dependency_error(str(exc))
+    elif args.tool == 'sitega':
+        if shutil.which("andy05cell.exe") is None:
+            _dependency_error("SiteGA executable missing: andy05cell.exe")
 
 
 def setup_discovery_tool(args) -> Any:
@@ -352,9 +405,45 @@ def setup_discovery_tool(args) -> Any:
         If an unknown tool name is specified in the arguments
     """
     if args.tool == 'streme':
-        return StremeDiscoveryTool(nmotifs=args.nmotifs)
+        return StremeDiscoveryTool(nmotifs=args.nmotifs, command=args.streme_command)
+    elif args.tool == 'meme':
+        return MemeDiscoveryTool(
+            command=args.meme_command,
+            objfun=args.meme_objfun,
+            model=args.meme_mod,
+            minsites=args.meme_minsites,
+            maxsites=args.meme_maxsites,
+            seed=args.meme_seed,
+            threads=args.meme_p,
+        )
     elif args.tool == 'bamm':
-        return BammDiscoveryTool()
+        return BammDiscoveryTool(bamm_command=args.bamm_command, streme_command=args.streme_command)
+    elif args.tool == 'dimont':
+        return DimontDiscoveryTool(
+            jar_path=args.dimont_jar,
+            java_command=args.java_command,
+            java_xmx=args.java_xmx,
+            threads=args.jstacs_threads,
+            position_tag=args.jstacs_position_tag,
+            value_tag=args.jstacs_value_tag,
+            bg_order=args.jstacs_bg_order,
+            motif_order=args.dimont_motif_order,
+            ess=args.dimont_ess,
+            starts=args.dimont_starts,
+        )
+    elif args.tool == 'slim':
+        return SlimDiscoveryTool(
+            jar_path=args.slim_jar,
+            java_command=args.java_command,
+            java_xmx=args.java_xmx,
+            threads=args.jstacs_threads,
+            position_tag=args.jstacs_position_tag,
+            value_tag=args.jstacs_value_tag,
+            bg_order=args.jstacs_bg_order,
+            motif_order=args.slim_motif_order,
+            modify=args.slim_modify,
+            starts=args.slim_starts,
+        )
     elif args.tool == 'sitega':
         return SitegaDiscoveryTool(nmotifs=args.nmotifs)
     else:
@@ -396,8 +485,7 @@ def setup_comparator(args) -> Any:
     Returns
     -------
     Any
-        Instance of the appropriate comparator class (TomtomComparator,
-        MotifComparator, or MotaliComparator)
+        Instance of the appropriate comparator class.
     
     Raises
     ------
@@ -414,7 +502,7 @@ def setup_comparator(args) -> Any:
         )
 
     elif args.comparator == 'continuous':
-        filter_type = None if args.jo_filter == 'none' else args.jo_filter
+        filter_type = None if args.c_filter == 'none' else args.c_filter
         return UniversalMotifComparator(
             name=f"{args.comparator}_comparator",
             metric=args.c_metric,
@@ -424,17 +512,10 @@ def setup_comparator(args) -> Any:
             seed=args.seed,
             filter_type=filter_type,
             filter_threshold=args.c_threshold,
-            min_kernel_size = args.c_min_kernel_size,
-            max_kernel_size = args.c_max_kernel_size,
-            search_range = args.c_search_range
+            min_kernel_size=args.min_kernel_size,
+            max_kernel_size=args.max_kernel_size,
+            search_range=args.c_search_range
 
-        )
-
-    elif args.comparator == 'motali':
-        return MotaliComparator(
-            fasta_path=args.foreground,
-            threshold=args.motali_threshold,
-            tmp_directory=args.output
         )
 
     else:
@@ -522,7 +603,7 @@ def main_cli():
         sys.exit(1)
 
     # Check dependencies
-    check_dependencies(args.tool)
+    check_dependencies(args)
 
     # Create output directory
     os.makedirs(args.output, exist_ok=True)

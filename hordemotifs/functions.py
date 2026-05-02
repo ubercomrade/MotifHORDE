@@ -1,732 +1,601 @@
-import numpy as np
-from numba import njit, prange
-from scipy.stats import pearsonr
-from .ragged import RaggedData
+"""Numerical helpers and Numba-backed scoring kernels."""
 
+from __future__ import annotations
+
+import numpy as np
+from numba import njit
+
+from hordemotifs.batches import (
+    SCORE_PADDING,
+    batch_with_values,
+    flatten_profile_bundle,
+    flatten_valid,
+    pack_batch,
+    pack_profile_bundle,
+)
 
 RC_TABLE = np.array([3, 2, 1, 0, 4], dtype=np.int8)
-BACKGROUND_FREQ = 0.25  # Background frequency for PWM calculation
-PFM_TO_PWM_PSEUDOCOUNT = 0.0001  # Pseudocount added to PFM values
-PCM_TO_PFM_NUCLEOTIDE_PSEUDOCOUNT = 0.25  # Pseudocount for nucleotide frequency
-PCM_TO_PFM_DENOMINATOR_CONSTANT = 1  # Constant added to denominator in PCM to PFM conversion
+PROFILE_EPS = np.float32(1e-6)
+SCAN_BUCKET_STEP = 32
+WINDOW_MATRIX_NDIM = 2
 
 
 def pfm_to_pwm(pfm):
-    """
-    Convert Position Frequency Matrix to Position Weight Matrix.
-    
-    Parameters
-    ----------
-    pfm : np.ndarray
-        Position Frequency Matrix of shape (4, L) where L is the motif length.
-        
-    Returns
-    -------
-    np.ndarray
-        Position Weight Matrix computed as log(PFM + pseudo_count) / background.
-    """
-    background = BACKGROUND_FREQ
-    pwm = np.log((pfm + PFM_TO_PWM_PSEUDOCOUNT) / background)
-    return pwm
+    """Convert Position Frequency Matrix to Position Weight Matrix."""
+    return np.log((pfm + 0.0001) / 0.25)
 
 
-def pcm_to_pfm(pcm):
-    """
-    Convert Position Count Matrix to Position Frequency Matrix.
-    
-    Parameters
-    ----------
-    pcm : np.ndarray
-        Position Count Matrix of shape (4, L) where L is the motif length.
-        
-    Returns
-    -------
-    np.ndarray
-        Position Frequency Matrix with pseudo-counts added.
-    """
+def pcm_to_pfm(pcm, pseudocount: float = 0.25):
+    """Convert Position Count Matrix to Position Frequency Matrix."""
     number_of_sites = pcm.sum(axis=0)
-    nuc_pseudo = PCM_TO_PFM_NUCLEOTIDE_PSEUDOCOUNT
-    pfm = (pcm + nuc_pseudo) / (number_of_sites + PCM_TO_PFM_DENOMINATOR_CONSTANT)
-    return pfm
+    nuc_pseudo = float(pseudocount)
+    return (pcm + nuc_pseudo) / (number_of_sites + 4.0 * nuc_pseudo)
 
 
-@njit
+def build_score_log_tail_table(scores: np.ndarray) -> np.ndarray:
+    """Build a score-to-log-tail lookup table from one score sample."""
+    flat = np.asarray(scores, dtype=np.float32).ravel()
+    if flat.size == 0:
+        return np.array([[0.0, 0.0]], dtype=np.float32)
+
+    scores_sorted = np.sort(flat)[::-1]
+    unique_scores, counts = np.unique(scores_sorted, return_counts=True)
+    unique_scores = unique_scores[::-1]
+    counts = counts[::-1]
+
+    cum_counts = np.cumsum(counts)
+    tail_probabilities = cum_counts / flat.size
+    log_tail = -np.log10(tail_probabilities)
+    return np.column_stack([unique_scores, log_tail]).astype(np.float32, copy=False)
+
+
+@njit(cache=False, nogil=False)
+def _lower_bound_desc(values, target):
+    """Find the first descending-table index whose score is not greater than target."""
+    size = values.shape[0]
+    if size <= 1 or target >= values[0]:
+        return 0
+    if target <= values[size - 1]:
+        return size - 1
+
+    lo = 0
+    hi = size
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if values[mid] > target:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+@njit(cache=False, nogil=False)
+def _apply_score_log_tail_table_numba(values, mask, scores_col, log_tail_col, padding_value: float):
+    """Map one dense masked score matrix to empirical log-tail values."""
+    rows, cols = values.shape
+    mapped = np.empty((rows, cols), dtype=np.float32)
+
+    for row_index in range(rows):
+        for col_index in range(cols):
+            if mask[row_index, col_index]:
+                idx = _lower_bound_desc(scores_col, values[row_index, col_index])
+                mapped[row_index, col_index] = log_tail_col[idx]
+            else:
+                mapped[row_index, col_index] = padding_value
+
+    return mapped
+
+
+def apply_score_log_tail_table(score_batch, table: np.ndarray):
+    """Map one score batch to empirical log-tail values using a lookup table."""
+    table_arr = np.asarray(table, dtype=np.float32)
+    if table_arr.size == 0:
+        empty_values = np.full_like(score_batch["values"], SCORE_PADDING)
+        return batch_with_values(score_batch, empty_values, padding_value=SCORE_PADDING)
+
+    mapped = _apply_score_log_tail_table_numba(
+        np.ascontiguousarray(score_batch["values"], dtype=np.float32),
+        np.ascontiguousarray(score_batch["mask"], dtype=np.bool_),
+        np.ascontiguousarray(table_arr[:, 0], dtype=np.float32),
+        np.ascontiguousarray(table_arr[:, 1], dtype=np.float32),
+        np.float32(SCORE_PADDING),
+    )
+    return batch_with_values(score_batch, mapped, padding_value=SCORE_PADDING)
+
+
+def _build_length_mask(lengths: np.ndarray, width: int) -> np.ndarray:
+    """Build one dense prefix mask from row lengths."""
+    return np.arange(width, dtype=np.int64)[None, :] < np.asarray(lengths, dtype=np.int64)[:, None]
+
+
+def apply_score_log_tail_table_to_profile_bundle(profile_bundle, table: np.ndarray):
+    """Map one 3D profile bundle to empirical log-tail values using one lookup table."""
+    table_arr = np.asarray(table, dtype=np.float32)
+    values = np.ascontiguousarray(profile_bundle["values"], dtype=np.float32)
+    lengths = np.asarray(profile_bundle["lengths"], dtype=np.int64)
+
+    if table_arr.size == 0:
+        empty_values = np.full_like(values, SCORE_PADDING)
+        return pack_profile_bundle(empty_values, lengths, SCORE_PADDING)
+
+    mask = np.ascontiguousarray(_build_length_mask(lengths, values.shape[2]), dtype=np.bool_)
+    mapped = np.empty_like(values)
+    scores_col = np.ascontiguousarray(table_arr[:, 0], dtype=np.float32)
+    log_tail_col = np.ascontiguousarray(table_arr[:, 1], dtype=np.float32)
+
+    for profile_index in range(values.shape[0]):
+        mapped[profile_index] = _apply_score_log_tail_table_numba(
+            values[profile_index],
+            mask,
+            scores_col,
+            log_tail_col,
+            np.float32(SCORE_PADDING),
+        )
+
+    return pack_profile_bundle(mapped, lengths, SCORE_PADDING)
+
+
+def scores_to_empirical_log_tail_bundle(profile_bundle):
+    """Convert one 3D profile bundle to empirical log-tail values within the current sample."""
+    table = build_score_log_tail_table(flatten_profile_bundle(profile_bundle))
+    return apply_score_log_tail_table_to_profile_bundle(profile_bundle, table)
+
+
+def normalize_empirical_log_tail_pair(score_batch_plus, score_batch_minus):
+    """Normalize two strand score batches using one shared empirical log-tail mapping."""
+    profile_bundle = pack_profile_bundle(
+        np.stack(
+            (
+                np.asarray(score_batch_plus["values"], dtype=np.float32),
+                np.asarray(score_batch_minus["values"], dtype=np.float32),
+            ),
+            axis=0,
+        ),
+        np.asarray(score_batch_plus["lengths"], dtype=np.int64),
+        SCORE_PADDING,
+    )
+    normalized = scores_to_empirical_log_tail_bundle(profile_bundle)
+    values_plus = normalized["values"][0]
+    values_minus = normalized["values"][1]
+    return (
+        pack_batch(values_plus, score_batch_plus["mask"], score_batch_plus["lengths"], SCORE_PADDING),
+        pack_batch(values_minus, score_batch_minus["mask"], score_batch_minus["lengths"], SCORE_PADDING),
+    )
+
+
+def lookup_score_for_tail_probability(table: np.ndarray, tail_probability: float) -> float:
+    """Convert a tail probability threshold to the corresponding score cutoff."""
+    if tail_probability <= 0:
+        return float(table[0, 0])
+
+    target_log_tail = -np.log10(tail_probability)
+    scores_col = table[:, 0]
+    log_tail_col = table[:, 1]
+    mask = log_tail_col >= target_log_tail
+
+    if not np.any(mask):
+        return float(scores_col[-1])
+
+    last_valid = np.where(mask)[0][-1]
+    return float(scores_col[last_valid])
+
+
 def score_seq(num_site, kmer, model):
-    """
-    Compute score for a sequence site using a k-mer model.
-    
-    Parameters
-    ----------
-    num_site : np.ndarray
-        Numerical representation of the DNA sequence site.
-    kmer : int
-        Length of the k-mer used for indexing.
-    model : np.ndarray
-        Scoring model matrix.
-        
-    Returns
-    -------
-    float
-        Computed score for the sequence site.
-    """
+    """Compute the score for one encoded site."""
+    site = np.asarray(num_site, dtype=np.int64)
+    matrix = np.asarray(model, dtype=np.float32).reshape(-1, np.asarray(model).shape[-1])
+    kmer = int(kmer)
     score = 0.0
-    seq_len = num_site.shape[0]
-    for i in range(seq_len - kmer + 1):
-        score_idx = 0
-        for j in range(kmer):
-            score_idx = score_idx * 5 + num_site[i + j]  # Convert to single index
-        score += model.flat[score_idx * model.shape[-1] + i]  # Access via flat index
+
+    for position in range(site.shape[0] - kmer + 1):
+        code = 0
+        for offset in range(kmer):
+            code = code * 5 + int(site[position + offset])
+        score += float(matrix[code, position])
 
     return score
 
 
-@njit(parallel=False)
-def all_scores(num_seq, model, kmer):
-    """
-    Standard scanning function for fixed-width motifs (PWM, simple K-mer).
-    Model width matches the scoring window.
-    """
-    length_of_site = model.shape[-1]
-    number_of_scores = num_seq.shape[0] - length_of_site + 1
-    scores = np.zeros((2, number_of_scores), dtype=np.float32)
-
-    for i in range(number_of_scores):
-        # 1. Forward
-        num_site = num_seq[i : i + length_of_site]
-        scores[0, i] = score_seq(num_site, kmer, model)
-
-        # 2. Reverse Complement
-        # Reverse view + Lookup
-        rc_site = RC_TABLE[num_site[::-1]]
-        scores[1, i] = score_seq(rc_site, kmer, model)
-
-    return scores
+def _prepare_model_rows(matrix: np.ndarray) -> np.ndarray:
+    """Return one motif tensor as a flat 5-ary row table."""
+    arr = np.asarray(matrix, dtype=np.float32)
+    return np.ascontiguousarray(arr.reshape((-1, arr.shape[-1])), dtype=np.float32)
 
 
-@njit(parallel=True)
-def _batch_all_scores_jit(data, offsets, matrix, kmer, is_revcomp, is_bamm=False):
-    """
-    Universal JIT kernel for PWM and BaMM models in batch mode.
-    For BaMM, extended window and 'N' padding are used.
-    
-    Parameters
-    ----------
-    data : np.ndarray
-        Flattened sequence data array.
-    offsets : np.ndarray
-        Offsets indicating sequence boundaries in the data array.
-    matrix : np.ndarray
-        Scoring matrix for motif evaluation.
-    kmer : int
-        K-mer length parameter for scoring.
-    is_revcomp : bool
-        Whether to consider reverse complement strand.
-    is_bamm : bool, optional
-        Whether to use BaMM-specific scoring (default is False).
-        
-    Returns
-    -------
-    tuple
-        Tuple containing the results array and new offsets array.
-    """
-    n_seq = len(offsets) - 1
-    m = matrix.shape[-1]
-    context_len = kmer - 1 if is_bamm else 0
-    window_size = m + context_len
-    
-    # 1. Calculate new offsets (still N - L + 1)
-    new_offsets = np.zeros(n_seq + 1, dtype=np.int64)
-    for i in range(n_seq):
-        seq_len = offsets[i+1] - offsets[i]
-        if seq_len >= m:
-            new_offsets[i+1] = seq_len - m + 1
-    
-    # Cumulative sum
-    for i in range(n_seq):
-        new_offsets[i+1] += new_offsets[i]
-        
-    total_scores = new_offsets[n_seq]
-    results = np.zeros(total_scores, dtype=np.float32)
-    
-    # 2. Calculate scores
-    for i in prange(n_seq):
-        start = offsets[i]
-        seq_len = offsets[i+1] - start
-        out_start = new_offsets[i]
-        n_scores = new_offsets[i+1] - out_start
-        
-        if n_scores > 0:
-            for k in range(n_scores):
-                if not is_bamm:
-                    # Standard PWM path
-                    num_site = data[start + k : start + k + m]
-                    if is_revcomp:
-                        num_site = RC_TABLE[num_site[::-1]]
-                else:
-                    # BaMM path with context and padding
-                    if not is_revcomp:
-                        # Forward: [k - context : k + L]
-                        s_idx = k - context_len
-                        e_idx = k + m
-                        num_site = np.full(window_size, 4, dtype=data.dtype)
-                        
-                        actual_start = max(0, s_idx)
-                        actual_end = min(seq_len, e_idx)
-                        dest_start = max(0, -s_idx)
-                        cloop = actual_end - actual_start
-                        if cloop > 0:
-                            num_site[dest_start : dest_start + cloop] = data[start + actual_start : start + actual_end]
-                    else:
-                        # RC: [k : k + L + context]
-                        r_start = k
-                        r_end = k + window_size
-                        raw_segment = np.full(window_size, 4, dtype=data.dtype)
-                        
-                        actual_end = min(seq_len, r_end)
-                        cloop = actual_end - r_start
-                        if cloop > 0:
-                            raw_segment[:cloop] = data[start + r_start : start + actual_end]
-                        num_site = RC_TABLE[raw_segment[::-1]]
+def _resolve_scan_layout(kmer: int, motif_len: int, with_context: bool) -> tuple[int, int, int]:
+    """Resolve the geometry used by the sequence-scanning kernels."""
+    context_len = kmer - 1 if with_context else 0
+    window_size = motif_len + context_len
+    n_terms = window_size - kmer + 1
+    return context_len, window_size, n_terms
 
-                results[out_start + k] = score_seq(num_site, kmer, matrix)
-                
-    return results, new_offsets
 
-@njit(parallel=True)
-def batch_best_scores_jit(data, offsets, matrix, kmer, is_revcomp, both_strands, is_bamm=False):
-    """
-    Find the best score for each sequence in RaggedData.
-    
-    Parameters
-    ----------
-    data : np.ndarray
-        Flattened sequence data array.
-    offsets : np.ndarray
-        Offsets indicating sequence boundaries in the data array.
-    matrix : np.ndarray
-        Scoring matrix for motif evaluation.
-    kmer : int
-        K-mer length parameter for scoring.
-    is_revcomp : bool
-        Whether to consider reverse complement strand.
-    both_strands : bool
-        Whether to evaluate both forward and reverse complement strands.
-    is_bamm : bool, optional
-        Whether to use BaMM-specific scoring (default is False).
-        
-    Returns
-    -------
-    np.ndarray
-        Array containing the best score for each sequence.
-    """
-    n_seq = len(offsets) - 1
-    m = matrix.shape[-1]
-    context_len = kmer - 1 if is_bamm else 0
-    window_size = m + context_len
-    best_results = np.full(n_seq, -1e9, dtype=np.float32)
+def _prepare_scan_inputs(sequences, matrix: np.ndarray):
+    """Normalize scan inputs to contiguous arrays and derived geometry."""
+    values = np.ascontiguousarray(sequences["values"], dtype=np.int8)
+    lengths = np.ascontiguousarray(sequences["lengths"], dtype=np.int64)
+    model_rows = _prepare_model_rows(matrix)
+    motif_len = int(model_rows.shape[-1])
+    out_lengths = np.maximum(lengths - motif_len + 1, 0)
+    max_scores = int(out_lengths.max(initial=0))
+    return values, lengths, model_rows, motif_len, max_scores, out_lengths
 
-    for i in prange(n_seq):
-        start = offsets[i]
-        seq_len = offsets[i+1] - start
-        
-        if seq_len < m:
+
+def _iter_scan_buckets(lengths: np.ndarray, motif_len: int, bucket_step: int = SCAN_BUCKET_STEP):
+    """Yield row-index buckets with similar output lengths."""
+    out_lengths = np.maximum(lengths - motif_len + 1, 0)
+    positive_indices = np.flatnonzero(out_lengths > 0)
+    if positive_indices.size == 0:
+        return
+
+    bucket_ids = (out_lengths[positive_indices] - 1) // max(int(bucket_step), 1)
+    order = np.argsort(bucket_ids, kind="mergesort")
+    sorted_indices = positive_indices[order]
+    sorted_bucket_ids = bucket_ids[order]
+
+    starts = np.r_[0, np.flatnonzero(np.diff(sorted_bucket_ids)) + 1]
+    stops = np.r_[starts[1:], sorted_indices.size]
+    for start, stop in zip(starts, stops, strict=False):
+        yield sorted_indices[start:stop]
+
+
+@njit(cache=False, fastmath=True, nogil=False)
+def _score_window_forward(seq_row, length: int, model_rows, pos: int, kmer: int, context_len: int, n_terms: int):
+    """Score one forward-aligned window."""
+    total = np.float32(0.0)
+    for term in range(n_terms):
+        code = 0
+        src_start = pos - context_len + term
+        for offset in range(kmer):
+            src = src_start + offset
+            encoded = 4
+            if 0 <= src < length:
+                encoded = int(seq_row[src])
+            code = code * 5 + encoded
+        total += model_rows[code, term]
+    return total
+
+
+@njit(cache=False, fastmath=True, nogil=False)
+def _score_window_reverse(seq_row, length: int, model_rows, pos: int, kmer: int, window_size: int, n_terms: int):
+    """Score one reverse-complement-aligned window."""
+    total = np.float32(0.0)
+    for term in range(n_terms):
+        code = 0
+        for offset in range(kmer):
+            src = pos + (window_size - 1 - (term + offset))
+            encoded = 4
+            if 0 <= src < length:
+                encoded = int(RC_TABLE[int(seq_row[src])])
+            code = code * 5 + encoded
+        total += model_rows[code, term]
+    return total
+
+
+@njit(cache=False, fastmath=True, nogil=False)
+def _scan_dense_kernel_numba(values, lengths, model_rows, kmer: int, context_len: int, n_terms: int):
+    """Score one dense encoded sequence batch for one strand."""
+    n_rows, _ = values.shape
+    motif_len = model_rows.shape[-1]
+    max_scores = max(values.shape[1] - motif_len + 1, 0)
+    scores = np.zeros((n_rows, max_scores), dtype=np.float32)
+    mask = np.zeros((n_rows, max_scores), dtype=np.bool_)
+
+    for row_index in range(n_rows):
+        length = int(lengths[row_index])
+        n_scores = max(length - motif_len + 1, 0)
+        if n_scores == 0:
             continue
 
-        n_scores = seq_len - m + 1
-        current_best = -1e9
+        seq_row = values[row_index]
+        for pos in range(n_scores):
+            scores[row_index, pos] = _score_window_forward(
+                seq_row,
+                length,
+                model_rows,
+                pos,
+                kmer,
+                context_len,
+                n_terms,
+            )
+            mask[row_index, pos] = True
 
-        for k in range(n_scores):
-            # Forward strand
-            if not is_revcomp or both_strands:
-                if not is_bamm:
-                    num_site = data[start + k : start + k + m]
-                else:
-                    s_idx = k - context_len
-                    e_idx = k + m
-                    num_site = np.full(window_size, 4, dtype=data.dtype)
-                    actual_start = max(0, s_idx)
-                    actual_end = min(seq_len, e_idx)
-                    dest_start = max(0, -s_idx)
-                    cloop = actual_end - actual_start
-                    if cloop > 0:
-                        num_site[dest_start : dest_start + cloop] = data[start + actual_start : start + actual_end]
-                
-                s_fwd = score_seq(num_site, kmer, matrix)
-                if s_fwd > current_best:
-                    current_best = s_fwd
-
-            # Reverse strand
-            if is_revcomp or both_strands:
-                if not is_bamm:
-                    num_site = data[start + k : start + k + m]
-                    rc_site = RC_TABLE[num_site[::-1]]
-                else:
-                    r_start = k
-                    r_end = k + window_size
-                    raw_segment = np.full(window_size, 4, dtype=data.dtype)
-                    actual_end = min(seq_len, r_end)
-                    cloop = actual_end - r_start
-                    if cloop > 0:
-                        raw_segment[:cloop] = data[start + r_start : start + actual_end]
-                    rc_site = RC_TABLE[raw_segment[::-1]]
-
-                s_rev = score_seq(rc_site, kmer, matrix)
-                if s_rev > current_best:
-                    current_best = s_rev
-        
-        best_results[i] = current_best
-            
-    return best_results
+    return scores, mask
 
 
-def batch_all_scores(sequences: RaggedData, matrix: np.ndarray, kmer: int = 1, is_revcomp: bool = False, is_bamm: bool = False) -> RaggedData:
-    """
-    Compute scores for all sequences in RaggedData.
-    Supports both PWM (is_bamm=False) and BaMM models.
-    
-    Parameters
-    ----------
-    sequences : RaggedData
-        Input sequences in RaggedData format.
-    matrix : np.ndarray
-        Scoring matrix for motif evaluation.
-    kmer : int, optional
-        K-mer length parameter for scoring (default is 1).
-    is_revcomp : bool, optional
-        Whether to consider reverse complement strand (default is False).
-    is_bamm : bool, optional
-        Whether to use BaMM-specific scoring (default is False).
-        
-    Returns
-    -------
-    RaggedData
-        RaggedData object containing computed scores.
-    """
-    data, offsets = _batch_all_scores_jit(sequences.data, sequences.offsets, matrix, kmer, is_revcomp, is_bamm=is_bamm)
-    return RaggedData(data, offsets)
+@njit(cache=False, fastmath=True, nogil=False)
+def _scan_dense_reverse_kernel_numba(values, lengths, model_rows, kmer: int, window_size: int, n_terms: int):
+    """Score one dense encoded sequence batch on the reverse-complement strand."""
+    n_rows, _ = values.shape
+    motif_len = model_rows.shape[-1]
+    max_scores = max(values.shape[1] - motif_len + 1, 0)
+    scores = np.zeros((n_rows, max_scores), dtype=np.float32)
+    mask = np.zeros((n_rows, max_scores), dtype=np.bool_)
 
-
-def batch_best_scores(sequences: RaggedData, matrix: np.ndarray, kmer: int = 1, is_revcomp: bool = False, both_strands: bool = False, is_bamm: bool = False) -> np.ndarray:
-    """
-    Return best scores for each sequence.
-    
-    Parameters
-    ----------
-    sequences : RaggedData
-        Input sequences in RaggedData format.
-    matrix : np.ndarray
-        Scoring matrix for motif evaluation.
-    kmer : int, optional
-        K-mer length parameter for scoring (default is 1).
-    is_revcomp : bool, optional
-        Whether to consider reverse complement strand (default is False).
-    both_strands : bool, optional
-        Whether to evaluate both forward and reverse complement strands (default is False).
-    is_bamm : bool, optional
-        Whether to use BaMM-specific scoring (default is False).
-        
-    Returns
-    -------
-    np.ndarray
-        Array containing the best score for each sequence.
-    """
-    return batch_best_scores_jit(sequences.data, sequences.offsets, matrix, kmer, is_revcomp, both_strands, is_bamm=is_bamm)
-
-
-def batch_get_frequencies(sequences: RaggedData, matrix: np.ndarray, kmer: int = 1, is_revcomp: bool = False, is_bamm: bool = False) -> RaggedData:
-    """
-    Compute positional frequencies (hit maps) for sequences.
-    
-    Parameters
-    ----------
-    sequences : RaggedData
-        Input sequences in RaggedData format.
-    matrix : np.ndarray
-        Scoring matrix for motif evaluation.
-    kmer : int, optional
-        K-mer length parameter for scoring (default is 1).
-    is_revcomp : bool, optional
-        Whether to consider reverse complement strand (default is False).
-    is_bamm : bool, optional
-        Whether to use BaMM-specific scoring (default is False).
-        
-    Returns
-    -------
-    RaggedData
-        RaggedData object containing frequency information.
-    """
-    scores = batch_all_scores(sequences, matrix, kmer=kmer, is_revcomp=is_revcomp, is_bamm=is_bamm)
-    return scores_to_frequencies(scores)
-
-
-def batch_get_hit_counts(sequences: RaggedData, matrix: np.ndarray, threshold: float, kmer: int = 1, is_revcomp: bool = False, both_strands: bool = False, is_bamm: bool = False) -> np.ndarray:
-    """
-    Return count of hits above threshold for each sequence.
-    
-    Parameters
-    ----------
-    sequences : RaggedData
-        Input sequences in RaggedData format.
-    matrix : np.ndarray
-        Scoring matrix for motif evaluation.
-    threshold : float
-        Threshold value for hit detection.
-    kmer : int, optional
-        K-mer length parameter for scoring (default is 1).
-    is_revcomp : bool, optional
-        Whether to consider reverse complement strand (default is False).
-    both_strands : bool, optional
-        Whether to evaluate both forward and reverse complement strands (default is False).
-    is_bamm : bool, optional
-        Whether to use BaMM-specific scoring (default is False).
-        
-    Returns
-    -------
-    np.ndarray
-        Array containing hit counts for each sequence.
-    """
-    return batch_get_hit_counts_jit(sequences.data, sequences.offsets, matrix, threshold, kmer, is_revcomp, both_strands, is_bamm=is_bamm)
-
-
-@njit(parallel=True)
-def batch_get_hit_counts_jit(data, offsets, matrix, threshold, kmer, is_revcomp, both_strands, is_bamm=False):
-    """
-    Count number of positions above threshold for each sequence.
-    
-    Parameters
-    ----------
-    data : np.ndarray
-        Flattened sequence data array.
-    offsets : np.ndarray
-        Offsets indicating sequence boundaries in the data array.
-    matrix : np.ndarray
-        Scoring matrix for motif evaluation.
-    threshold : float
-        Threshold value for hit detection.
-    kmer : int
-        K-mer length parameter for scoring.
-    is_revcomp : bool
-        Whether to consider reverse complement strand.
-    both_strands : bool
-        Whether to evaluate both forward and reverse complement strands.
-    is_bamm : bool, optional
-        Whether to use BaMM-specific scoring (default is False).
-        
-    Returns
-    -------
-    np.ndarray
-        Array containing hit counts for each sequence.
-    """
-    n_seq = len(offsets) - 1
-    counts = np.zeros(n_seq, dtype=np.int32)
-    
-    for i in prange(n_seq):
-        start = offsets[i]
-        seq_len = offsets[i+1] - start
-        m = matrix.shape[-1]
-        context_len = kmer - 1 if is_bamm else 0
-        window_size = m + context_len
-        
-        if seq_len < m:
-            counts[i] = 0
+    for row_index in range(n_rows):
+        length = int(lengths[row_index])
+        n_scores = max(length - motif_len + 1, 0)
+        if n_scores == 0:
             continue
 
-        n_scores = seq_len - m + 1
-        c = 0
+        seq_row = values[row_index]
+        for pos in range(n_scores):
+            scores[row_index, pos] = _score_window_reverse(seq_row, length, model_rows, pos, kmer, window_size, n_terms)
+            mask[row_index, pos] = True
 
-        for k in range(n_scores):
-            is_hit = False
-            
-            # Forward
-            if not is_revcomp or both_strands:
-                if not is_bamm:
-                    num_site = data[start + k : start + k + m]
-                else:
-                    s_idx = k - context_len
-                    e_idx = k + m
-                    num_site = np.full(window_size, 4, dtype=data.dtype)
-                    actual_start = max(0, s_idx)
-                    actual_end = min(seq_len, e_idx)
-                    dest_start = max(0, -s_idx)
-                    cloop = actual_end - actual_start
-                    if cloop > 0:
-                        num_site[dest_start : dest_start + cloop] = data[start + actual_start : start + actual_end]
-                
-                if score_seq(num_site, kmer, matrix) >= threshold:
-                    is_hit = True
-
-            # Reverse
-            if not is_hit and (is_revcomp or both_strands):
-                if not is_bamm:
-                    num_site = data[start + k : start + k + m]
-                    rc_site = RC_TABLE[num_site[::-1]]
-                else:
-                    r_start = k
-                    r_end = k + window_size
-                    raw_segment = np.full(window_size, 4, dtype=data.dtype)
-                    actual_end = min(seq_len, r_end)
-                    cloop = actual_end - r_start
-                    if cloop > 0:
-                        raw_segment[:cloop] = data[start + r_start : start + actual_end]
-                    rc_site = RC_TABLE[raw_segment[::-1]]
-
-                if score_seq(rc_site, kmer, matrix) >= threshold:
-                    is_hit = True
-            
-            if is_hit:
-                c += 1
-        counts[i] = c
-        
-    return counts
+    return scores, mask
 
 
-@njit(parallel=False)
-def all_scores_bamm(num_seq, model, kmer):
-    """
-    Specialized scanning function for Bayesian Markov Model (BaMM) motifs.
-    
-    Parameters
-    ----------
-    num_seq : np.ndarray
-        Numerical representation of the DNA sequence.
-    model : np.ndarray
-        BaMM scoring model matrix.
-    kmer : int
-        K-mer length parameter for scoring context.
-        
-    Returns
-    -------
-    np.ndarray
-        Array of shape (2, n_scores) containing forward and reverse complement scores.
-        First dimension represents strands (forward, reverse complement).
-        Second dimension contains scores for each position in the sequence.
-    """
-    length_of_motif = model.shape[-1]
-    context_len = kmer - 1
-    window_size = length_of_motif + context_len
+@njit(cache=False, fastmath=True, nogil=False)
+def _scan_dense_strands_kernel_numba(
+    values, lengths, model_rows, kmer: int, context_len: int, window_size: int, n_terms: int
+):
+    """Score one dense encoded batch on both strands in one call."""
+    n_rows, _ = values.shape
+    motif_len = model_rows.shape[-1]
+    max_scores = max(values.shape[1] - motif_len + 1, 0)
+    scores = np.zeros((n_rows, 2, max_scores), dtype=np.float32)
+    mask = np.zeros((n_rows, 2, max_scores), dtype=np.bool_)
 
-    # We produce the same number of scores as the sequence length allows for motifs of length L
-    number_of_scores = num_seq.shape[0] - length_of_motif + 1
-    scores = np.zeros((2, number_of_scores), dtype=np.float32)
+    for row_index in range(n_rows):
+        length = int(lengths[row_index])
+        n_scores = max(length - motif_len + 1, 0)
+        if n_scores == 0:
+            continue
 
-    seq_len = num_seq.shape[0]
+        seq_row = values[row_index]
+        for pos in range(n_scores):
+            scores[row_index, 0, pos] = _score_window_forward(
+                seq_row,
+                length,
+                model_rows,
+                pos,
+                kmer,
+                context_len,
+                n_terms,
+            )
+            scores[row_index, 1, pos] = _score_window_reverse(
+                seq_row,
+                length,
+                model_rows,
+                pos,
+                kmer,
+                window_size,
+                n_terms,
+            )
+            mask[row_index, 0, pos] = True
+            mask[row_index, 1, pos] = True
 
-    for i in range(number_of_scores):
-        # i is the START of the motif match (position 0 of motif)
+    return scores, mask
 
-        # --- 1. FORWARD STRAND ---
-        start_idx = i - context_len
-        end_idx = i + length_of_motif
 
-        if start_idx >= 0:
-            # Optimal case: fully inside sequence
-            num_site_fwd = num_seq[start_idx:end_idx]
+def _empty_score_scan_batch(n_rows: int, max_scores: int, out_lengths: np.ndarray):
+    """Return one empty score batch with the requested output geometry."""
+    empty_values = np.full((n_rows, max_scores), SCORE_PADDING, dtype=np.float32)
+    empty_mask = np.zeros((n_rows, max_scores), dtype=bool)
+    return pack_batch(empty_values, empty_mask, out_lengths, SCORE_PADDING)
+
+
+def batch_all_scores(
+    sequences, matrix: np.ndarray, kmer: int = 1, is_revcomp: bool = False, with_context: bool = False
+):
+    """Compute scores for all sequences in one dense masked batch."""
+    values, lengths, model_rows, motif_len, max_scores, out_lengths = _prepare_scan_inputs(sequences, matrix)
+    n_rows = int(values.shape[0])
+
+    if n_rows == 0 or max_scores == 0:
+        return _empty_score_scan_batch(n_rows, max_scores, out_lengths)
+
+    context_len, window_size, n_terms = _resolve_scan_layout(int(kmer), motif_len, bool(with_context))
+    if int(lengths.max(initial=0)) == int(lengths.min(initial=0)):
+        if is_revcomp:
+            scored_values, scored_mask = _scan_dense_reverse_kernel_numba(
+                values,
+                lengths,
+                model_rows,
+                int(kmer),
+                window_size,
+                n_terms,
+            )
         else:
-            # Boundary case (Start of Seq): Pad LEFT with N (4)
-            num_site_fwd = np.full(window_size, 4, dtype=num_seq.dtype)
-            # Copy valid part [0 : end_idx] to the end of buffer
-            # valid length = end_idx - 0 = end_idx
-            # pad length = -start_idx
-            # We copy to [pad_len : ]
-            num_site_fwd[-start_idx:] = num_seq[0:end_idx]
+            scored_values, scored_mask = _scan_dense_kernel_numba(
+                values,
+                lengths,
+                model_rows,
+                int(kmer),
+                context_len,
+                n_terms,
+            )
+    else:
+        scored_values = np.full((n_rows, max_scores), SCORE_PADDING, dtype=np.float32)
+        scored_mask = np.zeros((n_rows, max_scores), dtype=np.bool_)
+        for bucket_indices in _iter_scan_buckets(lengths, motif_len):
+            bucket_lengths = np.ascontiguousarray(lengths[bucket_indices], dtype=np.int64)
+            bucket_width = int(bucket_lengths.max(initial=0))
+            bucket_values = np.ascontiguousarray(values[bucket_indices, :bucket_width], dtype=np.int8)
+            if is_revcomp:
+                bucket_scores, bucket_mask = _scan_dense_reverse_kernel_numba(
+                    bucket_values,
+                    bucket_lengths,
+                    model_rows,
+                    int(kmer),
+                    window_size,
+                    n_terms,
+                )
+            else:
+                bucket_scores, bucket_mask = _scan_dense_kernel_numba(
+                    bucket_values,
+                    bucket_lengths,
+                    model_rows,
+                    int(kmer),
+                    context_len,
+                    n_terms,
+                )
+            bucket_score_width = bucket_scores.shape[1]
+            scored_values[bucket_indices, :bucket_score_width] = bucket_scores
+            scored_mask[bucket_indices, :bucket_score_width] = bucket_mask
 
-        scores[0, i] = score_seq(num_site_fwd, kmer, model)
-
-        # --- 2. REVERSE COMPLEMENT STRAND ---
-        # For BaMM RC, we need context from the RIGHT of the motif.
-        # Window: [i : i + L + context]
-
-        r_start = i
-        r_end = i + length_of_motif + context_len
-
-        if r_end <= seq_len:
-            # Optimal case
-            raw_segment = num_seq[r_start:r_end]
-        else:
-            # Boundary case (End of Seq): Pad RIGHT with N (4)
-            raw_segment = np.full(window_size, 4, dtype=num_seq.dtype)
-            valid_len = seq_len - r_start
-            raw_segment[:valid_len] = num_seq[r_start:]
-
-        # Reverse and Complement
-        rc_site = RC_TABLE[raw_segment[::-1]]
-
-        scores[1, i] = score_seq(rc_site, kmer, model)
-
-    return scores
+    return pack_batch(scored_values, scored_mask, out_lengths, SCORE_PADDING)
 
 
-@njit
+def batch_all_scores_strands(sequences, matrix: np.ndarray, kmer: int = 1, with_context: bool = False):
+    """Compute scores for both strands in one dense masked batch call."""
+    values, lengths, model_rows, motif_len, max_scores, out_lengths = _prepare_scan_inputs(sequences, matrix)
+    n_rows = int(values.shape[0])
+
+    if n_rows == 0 or max_scores == 0:
+        empty_batch = _empty_score_scan_batch(n_rows, max_scores, out_lengths)
+        return empty_batch, _empty_score_scan_batch(n_rows, max_scores, out_lengths)
+
+    context_len, window_size, n_terms = _resolve_scan_layout(int(kmer), motif_len, bool(with_context))
+    if int(lengths.max(initial=0)) == int(lengths.min(initial=0)):
+        scored_values, scored_mask = _scan_dense_strands_kernel_numba(
+            values,
+            lengths,
+            model_rows,
+            int(kmer),
+            context_len,
+            window_size,
+            n_terms,
+        )
+    else:
+        scored_values = np.full((n_rows, 2, max_scores), SCORE_PADDING, dtype=np.float32)
+        scored_mask = np.zeros((n_rows, 2, max_scores), dtype=np.bool_)
+        for bucket_indices in _iter_scan_buckets(lengths, motif_len):
+            bucket_lengths = np.ascontiguousarray(lengths[bucket_indices], dtype=np.int64)
+            bucket_width = int(bucket_lengths.max(initial=0))
+            bucket_values = np.ascontiguousarray(values[bucket_indices, :bucket_width], dtype=np.int8)
+            bucket_scores, bucket_mask = _scan_dense_strands_kernel_numba(
+                bucket_values,
+                bucket_lengths,
+                model_rows,
+                int(kmer),
+                context_len,
+                window_size,
+                n_terms,
+            )
+            bucket_score_width = bucket_scores.shape[2]
+            scored_values[bucket_indices, :, :bucket_score_width] = bucket_scores
+            scored_mask[bucket_indices, :, :bucket_score_width] = bucket_mask
+
+    plus_batch = pack_batch(scored_values[:, 0, :], scored_mask[:, 0, :], out_lengths, SCORE_PADDING)
+    minus_batch = pack_batch(scored_values[:, 1, :], scored_mask[:, 1, :], out_lengths, SCORE_PADDING)
+    return plus_batch, minus_batch
+
+
 def precision_recall_curve(classification, scores):
-    """Compute precision-recall curve (JIT-compiled)."""
+    """Compute the precision-recall curve."""
+    classification = np.asarray(classification)
+    scores = np.asarray(scores)
+
     if len(scores) == 0:
         return np.array([1.0]), np.array([0.0]), np.array([np.inf])
 
-    # Get indices for sorting scores in descending order
     indexes = np.argsort(scores)[::-1]
     sorted_scores = scores[indexes]
     sorted_classification = classification[indexes]
-
-    # Initialize arrays (with +1 buffer for initial point)
     number_of_uniq_scores = np.unique(scores).shape[0]
     max_size = number_of_uniq_scores + 1
 
     precision = np.zeros(max_size)
     recall = np.zeros(max_size)
     uniq_scores = np.zeros(max_size)
-
-    # Initial point: (recall=0, precision=1, threshold=inf)
     precision[0] = 1.0
     recall[0] = 0.0
     uniq_scores[0] = np.inf
 
-    TP, FP = 0, 0
+    true_positive = 0
+    false_positive = 0
     number_of_true = np.sum(classification == 1)
     number_of_false = np.sum(classification == 0)
-
-    if number_of_false == 0:
-        true_false_ratio = 1.0
-    else:
-        true_false_ratio = number_of_true / number_of_false
+    true_false_ratio = 1.0 if number_of_false == 0 else number_of_true / number_of_false
 
     position = 1
-    score = sorted_scores[0]
+    current_score = sorted_scores[0]
 
-    for i in range(len(scores)):
-        _score = sorted_scores[i]
-        _flag = sorted_classification[i]
-
-        # Update TP and FP
-        if _flag == 1:
-            TP += 1
+    for index, score in enumerate(sorted_scores):
+        flag = sorted_classification[index]
+        if flag == 1:
+            true_positive += 1
         else:
-            FP += 1
+            false_positive += 1
 
-        # Check if score changed
-        if i == len(scores) - 1 or score != sorted_scores[i + 1]:
-            uniq_scores[position] = _score
-
-            if TP + FP > 0:
-                precision[position] = TP / (TP + true_false_ratio * FP)
-            else:
-                precision[position] = 1.0
-
-            if number_of_true > 0:
-                recall[position] = TP / number_of_true
-            else:
-                recall[position] = 0.0
-
+        if index == len(scores) - 1 or current_score != sorted_scores[index + 1]:
+            uniq_scores[position] = score
+            denominator = true_positive + true_false_ratio * false_positive
+            precision[position] = true_positive / denominator if denominator > 0 else 1.0
+            recall[position] = true_positive / number_of_true if number_of_true > 0 else 0.0
             position += 1
-            if i < len(scores) - 1:
-                score = sorted_scores[i + 1]
+            if index < len(scores) - 1:
+                current_score = sorted_scores[index + 1]
 
     return precision[:position], recall[:position], uniq_scores[:position]
 
 
-@njit
 def roc_curve(classification, scores):
-    """Compute ROC curve (JIT-compiled)."""
+    """Compute the ROC curve."""
+    classification = np.asarray(classification)
+    scores = np.asarray(scores)
+
     if len(scores) == 0:
         return np.array([0.0]), np.array([0.0]), np.array([np.inf])
 
-    # Get indices for sorting scores in descending order
     indexes = np.argsort(scores)[::-1]
     sorted_scores = scores[indexes]
     sorted_classification = classification[indexes]
-
-    # Initialize arrays
     number_of_uniq_scores = np.unique(scores).shape[0]
     max_size = number_of_uniq_scores + 1
 
     tpr = np.zeros(max_size)
     fpr = np.zeros(max_size)
     uniq_scores = np.zeros(max_size)
-
-    # Initial point: (fpr=0, tpr=0, threshold=inf)
-    tpr[0] = 0.0
-    fpr[0] = 0.0
     uniq_scores[0] = np.inf
 
-    TP, FP = 0, 0
+    true_positive = 0
+    false_positive = 0
     number_of_true = np.sum(classification == 1)
     number_of_false = np.sum(classification == 0)
     position = 1
-    score = sorted_scores[0]
+    current_score = sorted_scores[0]
 
-    for i in range(len(scores)):
-        _score = sorted_scores[i]
-        _flag = sorted_classification[i]
-
-        # Update TP and FP
-        if _flag == 1:
-            TP += 1
+    for index, score in enumerate(sorted_scores):
+        flag = sorted_classification[index]
+        if flag == 1:
+            true_positive += 1
         else:
-            FP += 1
+            false_positive += 1
 
-        # Check if score changed
-        if i == len(scores) - 1 or score != sorted_scores[i + 1]:
-            uniq_scores[position] = _score
-
-            if number_of_true > 0:
-                tpr[position] = TP / number_of_true
-            else:
-                tpr[position] = 0.0
-
-            if number_of_false > 0:
-                fpr[position] = FP / number_of_false
-            else:
-                fpr[position] = 0.0
-
+        if index == len(scores) - 1 or current_score != sorted_scores[index + 1]:
+            uniq_scores[position] = score
+            tpr[position] = true_positive / number_of_true if number_of_true > 0 else 0.0
+            fpr[position] = false_positive / number_of_false if number_of_false > 0 else 0.0
             position += 1
-            if i < len(scores) - 1:
-                score = sorted_scores[i + 1]
+            if index < len(scores) - 1:
+                current_score = sorted_scores[index + 1]
 
     return tpr[:position], fpr[:position], uniq_scores[:position]
 
 
 def cut_roc(tpr: np.ndarray, fpr: np.ndarray, thr: np.ndarray, score_cutoff: float):
-    """
-    Truncate ROC curve at a specific score threshold.
-    
-    This function truncates the ROC curve (True Positive Rate vs False Positive Rate)
-    at a given score threshold. If interpolation is needed between points, it
-    performs linear interpolation to determine the TPR and FPR values at the exact
-    score cutoff.
-    
-    Parameters
-    ----------
-    tpr : np.ndarray
-        True Positive Rate values from the ROC curve.
-    fpr : np.ndarray
-        False Positive Rate values from the ROC curve.
-    thr : np.ndarray
-        Threshold values corresponding to each TPR/FPR pair.
-    score_cutoff : float
-        The score threshold at which to truncate the ROC curve.
-    
-    Returns
-    -------
-    tuple
-        Tuple containing (truncated_tpr, truncated_fpr, truncated_thresholds).
-    """
+    """Truncate ROC curve at a specific score threshold."""
     if score_cutoff == -np.inf:
         return tpr, fpr, thr
 
-    # thr starts with inf, then decreases
     mask = thr >= score_cutoff
     if not np.any(mask):
-        return np.array([tpr[0]], dtype=tpr.dtype), np.array([0.0], dtype=fpr.dtype), np.array([score_cutoff], dtype=thr.dtype)
+        return (
+            np.array([tpr[0]], dtype=tpr.dtype),
+            np.array([0.0], dtype=fpr.dtype),
+            np.array([score_cutoff], dtype=thr.dtype),
+        )
 
     last = int(np.where(mask)[0][-1])
-
     if thr[last] == score_cutoff or last == len(thr) - 1:
         return tpr[: last + 1], fpr[: last + 1], thr[: last + 1]
 
-    # Score interpolation
     s0, s1 = float(thr[last]), float(thr[last + 1])
     t0, t1 = float(tpr[last]), float(tpr[last + 1])
     f0, f1 = float(fpr[last]), float(fpr[last + 1])
-
     alpha = 0.0 if s0 == s1 else (score_cutoff - s0) / (s1 - s0)
     t_cut = t0 + alpha * (t1 - t0)
     f_cut = f0 + alpha * (f1 - f0)
@@ -734,55 +603,29 @@ def cut_roc(tpr: np.ndarray, fpr: np.ndarray, thr: np.ndarray, score_cutoff: flo
     tpr_cut = np.concatenate([tpr[: last + 1], np.array([t_cut], dtype=tpr.dtype)])
     fpr_cut = np.concatenate([fpr[: last + 1], np.array([f_cut], dtype=fpr.dtype)])
     thr_cut = np.concatenate([thr[: last + 1], np.array([score_cutoff], dtype=thr.dtype)])
-
     return tpr_cut, fpr_cut, thr_cut
 
 
 def cut_prc(rec: np.ndarray, prec: np.ndarray, thr: np.ndarray, score_cutoff: float):
-    """
-    Truncate Precision-Recall curve at a specific score threshold.
-    
-    This function truncates the Precision-Recall curve at a given score threshold.
-    If interpolation is needed between points, it performs linear interpolation
-    to determine the precision and recall values at the exact score cutoff.
-    
-    Parameters
-    ----------
-    rec : np.ndarray
-        Recall values from the Precision-Recall curve.
-    prec : np.ndarray
-        Precision values from the Precision-Recall curve.
-    thr : np.ndarray
-        Threshold values corresponding to each precision/recall pair.
-    score_cutoff : float
-        The score threshold at which to truncate the PRC.
-    
-    Returns
-    -------
-    tuple
-        Tuple containing (truncated_recall, truncated_precision, truncated_thresholds).
-    """
+    """Truncate Precision-Recall curve at a specific score threshold."""
     if score_cutoff == -np.inf:
         return rec, prec, thr
 
-    # thr starts with inf, then decreases
-    # find i: last index where thr[i] >= score_cutoff
     mask = thr >= score_cutoff
     if not np.any(mask):
-        # threshold too high -> almost empty
-        return np.array([0.0], dtype=rec.dtype), np.array([prec[0]], dtype=prec.dtype), np.array([score_cutoff], dtype=thr.dtype)
+        return (
+            np.array([0.0], dtype=rec.dtype),
+            np.array([prec[0]], dtype=prec.dtype),
+            np.array([score_cutoff], dtype=thr.dtype),
+        )
 
     last = int(np.where(mask)[0][-1])
-
-    # if we hit the node exactly - just truncate
     if thr[last] == score_cutoff or last == len(thr) - 1:
         return rec[: last + 1], prec[: last + 1], thr[: last + 1]
 
-    # otherwise interpolate between last and last+1 by score
-    s0, s1 = float(thr[last]), float(thr[last + 1])  # s0 > cutoff > s1
+    s0, s1 = float(thr[last]), float(thr[last + 1])
     r0, r1 = float(rec[last]), float(rec[last + 1])
     p0, p1 = float(prec[last]), float(prec[last + 1])
-
     alpha = 0.0 if s0 == s1 else (score_cutoff - s0) / (s1 - s0)
     r_cut = r0 + alpha * (r1 - r0)
     p_cut = p0 + alpha * (p1 - p0)
@@ -790,313 +633,165 @@ def cut_prc(rec: np.ndarray, prec: np.ndarray, thr: np.ndarray, score_cutoff: fl
     rec_cut = np.concatenate([rec[: last + 1], np.array([r_cut], dtype=rec.dtype)])
     prec_cut = np.concatenate([prec[: last + 1], np.array([p_cut], dtype=prec.dtype)])
     thr_cut = np.concatenate([thr[: last + 1], np.array([score_cutoff], dtype=thr.dtype)])
-
     return rec_cut, prec_cut, thr_cut
 
 
 def standardized_pauc(pauc_raw: float, pauc_min: float, pauc_max: float) -> float:
-    """
-    Standardize partial AUC value to range [0.5, 1].
-    
-    This function standardizes a raw partial AUC value to a range between 0.5 and 1,
-    where 0.5 represents random performance and 1 represents perfect performance.
-    This standardization accounts for the theoretical minimum and maximum possible
-    partial AUC values for the given conditions.
-    
-    Parameters
-    ----------
-    pauc_raw : float
-        Raw partial AUC value to standardize.
-    pauc_min : float
-        Minimum possible partial AUC value for the given conditions.
-    pauc_max : float
-        Maximum possible partial AUC value for the given conditions.
-    
-    Returns
-    -------
-    float
-        Standardized partial AUC value in range [0.5, 1].
-    """
-    denom = (pauc_max - pauc_min)
+    """Standardize a partial AUC value to the range [0.5, 1.0]."""
+    denom = pauc_max - pauc_min
     if denom <= 0:
         return 0.5
     return 0.5 * (1.0 + (pauc_raw - pauc_min) / denom)
 
 
-
-def scores_to_frequencies(ragged_scores: RaggedData) -> RaggedData:
-    """
-    Convert RaggedData containing scores to frequency representation.
-    
-    This function computes log-frequency transformation of scores where each
-    unique score value is replaced by its negative log-frequency across all
-    sequences in the RaggedData structure.
-    
-    Parameters
-    ----------
-    ragged_scores : RaggedData
-        Input RaggedData containing score values.
-        
-    Returns
-    -------
-    RaggedData
-        RaggedData with transformed frequency values.
-    """
-    flat = ragged_scores.data
-    n = flat.size
-    
-    if n == 0:
-        return RaggedData(np.zeros(0, dtype=np.float32), ragged_scores.offsets.copy())
-
-    _, inv, cnt = np.unique(flat, return_inverse=True, return_counts=True)
-    surv = np.cumsum(cnt[::-1])[::-1]
-    
-    # To avoid log10(0)
-    eps = 1e-12
-    log_p = np.log10(n + eps) - np.log10(surv + eps)
-    
-    new_data = log_p[inv].astype(np.float32)
-    return RaggedData(new_data, ragged_scores.offsets.copy())
+def scores_to_empirical_log_tail(score_batch):
+    """Convert one score batch to empirical log-tail values within the current sample."""
+    table = build_score_log_tail_table(flatten_valid(score_batch))
+    return apply_score_log_tail_table(score_batch, table)
 
 
-@njit(fastmath=True, cache=True)
-def _fast_overlap_kernel_numba(data1, offsets1, data2, offsets2, search_range):
-    """
-    Fast overlap coefficient kernel for RaggedData using JIT compilation.
-    
-    This kernel computes the overlap coefficient (Szymkiewicz-Simpson coefficient)
-    between two sets of ragged sequences, finding the best alignment within
-    the specified search range.
-    
-    Parameters
-    ----------
-    data1 : np.ndarray
-        Flattened data array for first sequence collection.
-    offsets1 : np.ndarray
-        Offsets for first sequence collection.
-    data2 : np.ndarray
-        Flattened data array for second sequence collection.
-    offsets2 : np.ndarray
-        Offsets for second sequence collection.
-    search_range : int
-        Range of offsets to search for best alignment (from -search_range to +search_range).
-        
-    Returns
-    -------
-    tuple
-        Tuple containing (best_overlap, best_offset) where:
-        best_overlap : Maximum overlap coefficient found.
-        best_offset : Offset at which maximum overlap occurs.
-    """
-    n_seq = len(offsets1) - 1
-    n_offsets = 2 * search_range + 1
-    
-    inters = np.zeros(n_offsets, dtype=np.float32)
-    sum1s  = np.zeros(n_offsets, dtype=np.float32)
-    sum2s  = np.zeros(n_offsets, dtype=np.float32)
-
-    for i in range(n_seq):
-        s1 = data1[offsets1[i]:offsets1[i+1]]
-        s2 = data2[offsets2[i]:offsets2[i+1]]
-        vlen1 = s1.size
-        vlen2 = s2.size
-
-        for k in range(n_offsets):
-            offset = k - search_range
-            idx1_start = 0 if offset < 0 else offset
-            idx2_start = -offset if offset < 0 else 0
-
-            if idx1_start >= vlen1 or idx2_start >= vlen2:
-                continue
-
-            overlap = min(vlen1 - idx1_start, vlen2 - idx2_start)
-            if overlap <= 0:
-                continue
-
-            local_inter = np.float32(0.0)
-            local_s1    = np.float32(0.0)
-            local_s2    = np.float32(0.0)
-
-            for j in range(overlap):
-                v1 = s1[idx1_start + j]
-                v2 = s2[idx2_start + j]
-                local_s1 += v1
-                local_s2 += v2
-                # min(v1, v2) = 0.5 * (v1 + v2 - |v1 - v2|)
-                local_inter += np.float32(0.5) * (v1 + v2 - abs(v1 - v2))
-
-            inters[k] += local_inter
-            sum1s[k]  += local_s1
-            sum2s[k]  += local_s2
-
-    best = -1.0
-    best_offset = 0
-    eps = 1e-6
-
-    for k in range(n_offsets):
-        denom = min(sum1s[k], sum2s[k])
-        if denom > eps:
-            val = inters[k] / denom
-            if val > best:
-                best = val
-                best_offset = k - search_range
-
-    return best, best_offset
-
-@njit(fastmath=True, cache=True)
-def _fast_cj_kernel_numba(data1, offsets1, data2, offsets2, search_range):
-    """
-    Fast  Continues Jaccard (CJ) coefficient kernel for RaggedData using JIT compilation.
-    
-    This kernel computes the continues jaccard coefficient between two sets of
-    ragged sequences, finding the best alignment within the specified search range.
-    
-    Parameters
-    ----------
-    data1 : np.ndarray
-        Flattened data array for first sequence collection.
-    offsets1 : np.ndarray
-        Offsets for first sequence collection.
-    data2 : np.ndarray
-        Flattened data array for second sequence collection.
-    offsets2 : np.ndarray
-        Offsets for second sequence collection.
-    search_range : int
-        Range of offsets to search for best alignment (from -search_range to +search_range).
-        
-    Returns
-    -------
-    tuple
-        Tuple containing (best_cj, best_offset) where:
-        best_cj : Maximum Czekanowski-Dice coefficient found.
-        best_offset : Offset at which maximum coefficient occurs.
-    """
-    n_seq = len(offsets1) - 1
-    n_offsets = 2 * search_range + 1
-    
-    sums  = np.zeros(n_offsets, dtype=np.float32)
-    diffs = np.zeros(n_offsets, dtype=np.float32)
-
-    for i in range(n_seq):
-        s1 = data1[offsets1[i]:offsets1[i+1]]
-        s2 = data2[offsets2[i]:offsets2[i+1]]
-        vlen1 = s1.size
-        vlen2 = s2.size
-
-        for k in range(n_offsets):
-            offset = k - search_range
-            idx1_start = 0 if offset < 0 else offset
-            idx2_start = -offset if offset < 0 else 0
-
-            if idx1_start >= vlen1 or idx2_start >= vlen2:
-                continue
-
-            overlap = min(vlen1 - idx1_start, vlen2 - idx2_start)
-            if overlap <= 0:
-                continue
-
-            local_sum = np.float32(0.0)
-            local_diff = np.float32(0.0)
-
-            for j in range(overlap):
-                v1 = s1[idx1_start + j]
-                v2 = s2[idx2_start + j]
-                local_sum += (v1 + v2)
-                local_diff += abs(v1 - v2)
-
-            sums[k] += local_sum
-            diffs[k] += local_diff
-
-    best_cj = -1.0
-    best_offset = 0
-    eps = 1e-6
-
-    for k in range(n_offsets):
-        S = sums[k]
-        D = diffs[k]
-        denom = S + D
-        if denom > eps:
-            cj = (S - D) / denom
-            if cj > best_cj:
-                best_cj = cj
-                best_offset = k - search_range
-
-    return best_cj, best_offset
+def prepare_profile_bundle(bundle: dict) -> dict:
+    """Return one contiguous profile bundle with explicit float32 values."""
+    values = np.ascontiguousarray(bundle["values"], dtype=np.float32)
+    lengths = np.ascontiguousarray(bundle["lengths"], dtype=np.int64)
+    return pack_profile_bundle(values, lengths, SCORE_PADDING)
 
 
-def _fast_pearson_kernel(data1, offsets1, data2, offsets2, search_range):
-    """Pearson correlation kernel for RaggedData using numpy built-in functions."""
-    
-    n_seq = len(offsets1) - 1
-    n_offsets = 2 * search_range + 1
-    
-    correlations = np.zeros(n_offsets, dtype=np.float32)
-    pvalues = np.ones(n_offsets, dtype=np.float32)
-    valid_correlations = np.zeros(n_offsets, dtype=np.bool_)
+@njit(cache=False, nogil=True, fastmath=True)
+def _overlap_sums_numba(values1: np.ndarray, values2: np.ndarray) -> tuple[float, float, float]:
+    """Return sum(values1), sum(values2), and sum(min(values1, values2)) in one pass."""
+    sum1 = 0.0
+    sum2 = 0.0
+    intersection = 0.0
 
-    for k in range(n_offsets):
-        offset = k - search_range
-        
-        all_x_values = []
-        all_y_values = []
-        
-        for i in range(n_seq):
-            s1 = data1[offsets1[i]:offsets1[i+1]]
-            s2 = data2[offsets2[i]:offsets2[i+1]]
-            vlen1 = s1.size
-            vlen2 = s2.size
+    for index in range(values1.size):
+        value1 = values1[index]
+        value2 = values2[index]
+        sum1 += value1
+        sum2 += value2
+        intersection += value1 if value1 < value2 else value2
 
-            idx1_start = 0 if offset < 0 else offset
-            idx2_start = -offset if offset < 0 else 0
+    return sum1, sum2, intersection
 
-            if idx1_start >= vlen1 or idx2_start >= vlen2:
-                continue
 
-            overlap = min(vlen1 - idx1_start, vlen2 - idx2_start)
-            if overlap <= 0:
-                continue
+def _flat_float32_pair(scores1: np.ndarray, scores2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return contiguous flattened float32 views for pairwise profile metrics."""
+    values1 = np.ascontiguousarray(np.asarray(scores1, dtype=np.float32).ravel())
+    values2 = np.ascontiguousarray(np.asarray(scores2, dtype=np.float32).ravel())
+    if values1.size != values2.size:
+        raise ValueError("scores1 and scores2 must contain the same number of values.")
+    return values1, values2
 
-            x_vals = s1[idx1_start:idx1_start + overlap]
-            y_vals = s2[idx2_start:idx2_start + overlap]
-            
-            all_x_values.extend(x_vals)
-            all_y_values.extend(y_vals)
 
-        if len(all_x_values) > 1:  # Need at least 2 points for correlation
-            x_array = np.array(all_x_values, dtype=np.float64)
-            y_array = np.array(all_y_values, dtype=np.float64)
-            
-            # Check if either array has zero variance
-            if np.var(x_array) > 1e-10 and np.var(y_array) > 1e-10:
-                corr_val, pvalue = pearsonr(x_array, y_array)
-                correlations[k] = corr_val
-                pvalues[k] = pvalue
-                valid_correlations[k] = True
-            else:
-                # If one variable has no variance, correlation is undefined (set to 0)
-                correlations[k] = 0.0
-                pvalues[k] = 1.0
-                valid_correlations[k] = True
+def _window_float32_pair(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return contiguous float32 window matrices with validated shape."""
+    values_x = np.ascontiguousarray(np.asarray(x, dtype=np.float32))
+    values_y = np.ascontiguousarray(np.asarray(y, dtype=np.float32))
+    if values_x.shape != values_y.shape:
+        raise ValueError("x and y must have the same shape.")
+    if values_x.ndim != WINDOW_MATRIX_NDIM:
+        raise ValueError("x and y must be 2D arrays.")
+    return values_x, values_y
 
-    # Find the best correlation among valid ones
-    best_corr = -2.0  # Pearson correlation ranges from -1 to 1
-    best_offset = 0
-    found_valid = False
 
-    for k in range(n_offsets):
-        if valid_correlations[k] and correlations[k] > best_corr:
-            best_corr = correlations[k]
-            best_pvalue = pvalues[k]
-            best_offset = k - search_range
-            found_valid = True
+def calc_co(scores1: np.ndarray, scores2: np.ndarray, eps: float = float(PROFILE_EPS)) -> float:
+    """Compute the CO score over one selected window collection."""
+    values1, values2 = _flat_float32_pair(scores1, scores2)
+    sum1, sum2, intersection = _overlap_sums_numba(values1, values2)
+    denom = min(sum1, sum2)
+    if denom <= eps:
+        return 0.0
+    return float(intersection / denom)
 
-    if not found_valid:
-        best_corr = 0.0  # Default if no valid correlations found
-        best_pvalue = 1.0
 
-    return best_corr, best_pvalue, best_offset
+def calc_dice(scores1: np.ndarray, scores2: np.ndarray, eps: float = float(PROFILE_EPS)) -> float:
+    """Compute the Dice score over one selected window collection."""
+    values1, values2 = _flat_float32_pair(scores1, scores2)
+    sum1, sum2, intersection = _overlap_sums_numba(values1, values2)
+    denom = sum1 + sum2
+    if denom <= eps:
+        return 0.0
+    return float((2.0 * intersection) / denom)
+
+
+@njit(cache=False, nogil=True, fastmath=True)
+def _rowwise_overlap_similarity_numba(
+    values_x: np.ndarray,
+    values_y: np.ndarray,
+    eps: float,
+    use_dice_denominator: bool,
+) -> np.ndarray:
+    """Compute one overlap-based similarity value per row without temporary arrays."""
+    n_rows = values_x.shape[0]
+    n_cols = values_x.shape[1]
+    out = np.empty(n_rows, dtype=np.float32)
+
+    for row_index in range(n_rows):
+        sum_x = 0.0
+        sum_y = 0.0
+        intersection = 0.0
+
+        for col_index in range(n_cols):
+            value_x = values_x[row_index, col_index]
+            value_y = values_y[row_index, col_index]
+            sum_x += value_x
+            sum_y += value_y
+            intersection += value_x if value_x < value_y else value_y
+
+        if use_dice_denominator:
+            denom = sum_x + sum_y
+            out[row_index] = (2.0 * intersection) / denom if denom > eps else np.nan
+        else:
+            denom = min(sum_x, sum_y)
+            out[row_index] = intersection / denom if denom > eps else np.nan
+
+    return out
+
+
+def rowwise_co(x: np.ndarray, y: np.ndarray, eps: float = float(PROFILE_EPS)) -> np.ndarray:
+    """Compute one CO value per selected window."""
+    values_x, values_y = _window_float32_pair(x, y)
+    return _rowwise_overlap_similarity_numba(values_x, values_y, float(eps), False)
+
+
+def rowwise_dice(x: np.ndarray, y: np.ndarray, eps: float = float(PROFILE_EPS)) -> np.ndarray:
+    """Compute one Dice value per selected window."""
+    values_x, values_y = _window_float32_pair(x, y)
+    return _rowwise_overlap_similarity_numba(values_x, values_y, float(eps), True)
+
+
+@njit(cache=False, nogil=True, fastmath=True)
+def _rowwise_cosine_numba(values_x: np.ndarray, values_y: np.ndarray, eps: float) -> np.ndarray:
+    """Compute one cosine value per row without temporary arrays."""
+    n_rows = values_x.shape[0]
+    n_cols = values_x.shape[1]
+    out = np.empty(n_rows, dtype=np.float32)
+
+    for row_index in range(n_rows):
+        dot = 0.0
+        norm_x = 0.0
+        norm_y = 0.0
+
+        for col_index in range(n_cols):
+            value_x = values_x[row_index, col_index]
+            value_y = values_y[row_index, col_index]
+            dot += value_x * value_y
+            norm_x += value_x * value_x
+            norm_y += value_y * value_y
+
+        norm = np.sqrt(norm_x) * np.sqrt(norm_y)
+        out[row_index] = dot / norm if norm > eps else np.nan
+
+    return out
+
+
+def rowwise_cosine(x: np.ndarray, y: np.ndarray, eps: float = float(PROFILE_EPS)) -> np.ndarray:
+    """Compute one cosine value per selected window."""
+    values_x, values_y = _window_float32_pair(x, y)
+    return _rowwise_cosine_numba(values_x, values_y, float(eps))
 
 
 def format_params(params: dict) -> str:
+    """Format parameters as a deterministic string key."""
     keys = sorted(params.keys())
-    return "_".join(f"{k}-{params[k]}" for k in keys)
+    return "_".join(f"{key}-{params[key]}" for key in keys)
