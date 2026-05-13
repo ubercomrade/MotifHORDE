@@ -53,7 +53,27 @@ def _require_length(kwargs: dict) -> int:
     return int(length)
 
 
-def _read_indexed_models(path: str, model_type: str, prefix: str, number_of_motifs: int) -> List[GenericModel]:
+def _has_expected_length(motif: GenericModel, expected_length: int | None) -> bool:
+    if expected_length is None or motif.length == expected_length:
+        return True
+
+    logger.warning(
+        "Skipping %s motif %s with length %s; expected %s",
+        motif.type_key,
+        motif.name,
+        motif.length,
+        expected_length,
+    )
+    return False
+
+
+def _read_indexed_models(
+    path: str,
+    model_type: str,
+    prefix: str,
+    number_of_motifs: int,
+    expected_length: int | None = None,
+) -> List[GenericModel]:
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return []
 
@@ -68,7 +88,8 @@ def _read_indexed_models(path: str, model_type: str, prefix: str, number_of_moti
                 return []
             break
         motif.name = f"{prefix}-{index + 1}"
-        motifs.append(motif)
+        if _has_expected_length(motif, expected_length):
+            motifs.append(motif)
     return motifs
 
 
@@ -95,7 +116,9 @@ def _run_streme(
         background,
         "--objfun",
         "de",
-        "--w",
+        "--minw",
+        str(length),
+        "--maxw",
         str(length),
         "-nmotifs",
         str(number_of_motifs),
@@ -116,7 +139,13 @@ def _existing_xml_paths(output_dir: str, patterns: list[str]) -> list[str]:
     return paths
 
 
-def _read_xml_models(paths: list[str], model_type: str, prefix: str, number_of_motifs: int) -> List[GenericModel]:
+def _read_xml_models(
+    paths: list[str],
+    model_type: str,
+    prefix: str,
+    number_of_motifs: int,
+    expected_length: int | None = None,
+) -> List[GenericModel]:
     motifs: List[GenericModel] = []
     for path in paths:
         try:
@@ -125,6 +154,8 @@ def _read_xml_models(paths: list[str], model_type: str, prefix: str, number_of_m
             logger.warning("Skipping invalid %s output %s: %s", model_type, path, exc)
             continue
         motif.name = f"{prefix}-{len(motifs) + 1}"
+        if not _has_expected_length(motif, expected_length):
+            continue
         motifs.append(motif)
         if len(motifs) >= number_of_motifs:
             break
@@ -150,7 +181,7 @@ class StremeDiscoveryTool(MotifDiscoveryTool):
     ) -> List[GenericModel]:
         length = _require_length(kwargs)
         tmp_meme = _run_streme(foreground, background, output_dir, length, number_of_motifs, self.command)
-        return _read_indexed_models(tmp_meme, "pwm", "Streme", number_of_motifs)
+        return _read_indexed_models(tmp_meme, "pwm", "Streme", number_of_motifs, expected_length=length)
 
 
 class MemeDiscoveryTool(MotifDiscoveryTool):
@@ -195,8 +226,11 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
             "-revcomp",
             "-nmotifs",
             str(number_of_motifs),
-            "-w",
+            "-minw",
             str(length),
+            "-maxw",
+            str(length),
+            "-nomatrim",
             "-text",
             "-objfun",
             self.objfun,
@@ -221,7 +255,7 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
                 handle.write(result.stdout)
         elif os.path.exists(os.path.join(output_dir, "meme.txt")):
             tmp_meme = os.path.join(output_dir, "meme.txt")
-        return _read_indexed_models(tmp_meme, "pwm", "Meme", number_of_motifs)
+        return _read_indexed_models(tmp_meme, "pwm", "Meme", number_of_motifs, expected_length=length)
 
 
 class BammDiscoveryTool(MotifDiscoveryTool):
@@ -279,7 +313,8 @@ class BammDiscoveryTool(MotifDiscoveryTool):
                 continue
             motif = read_model(bamm_path, "bamm", order=order)
             motif.name = f"Bamm-{index}"
-            motifs.append(motif)
+            if _has_expected_length(motif, length):
+                motifs.append(motif)
         return motifs
 
 
@@ -427,7 +462,7 @@ class DimontDiscoveryTool(MotifDiscoveryTool):
         )
         run_checked(cmd)
         paths = _existing_xml_paths(output_dir, ["*dimont*.xml", "*Dimont*.xml", "*.xml"])
-        return _read_xml_models(paths, "dimont", "Dimont", number_of_motifs)
+        return _read_xml_models(paths, "dimont", "Dimont", number_of_motifs, expected_length=length)
 
 
 class SlimDiscoveryTool(MotifDiscoveryTool):
@@ -500,7 +535,7 @@ class SlimDiscoveryTool(MotifDiscoveryTool):
         )
         run_checked(cmd)
         paths = _existing_xml_paths(output_dir, ["*slim*.xml", "*Slim*.xml", "*.xml"])
-        return _read_xml_models(paths, "slim", "Slim", number_of_motifs)
+        return _read_xml_models(paths, "slim", "Slim", number_of_motifs, expected_length=length)
 
 
 class SitegaDiscoveryTool(MotifDiscoveryTool):
@@ -530,5 +565,6 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         for index, path in enumerate(sorted(glob.glob(os.path.join(output_dir, "train.fa_mat*"))), start=1):
             motif = read_model(path, "sitega")
             motif.name = f"Sitega-{index}"
-            motifs.append(motif)
+            if _has_expected_length(motif, length):
+                motifs.append(motif)
         return motifs

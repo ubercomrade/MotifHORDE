@@ -45,7 +45,7 @@ def test_dimont_discovery_writes_fasta_and_reads_generic_model(monkeypatch, tmp_
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     def fake_read_model(path, model_type, **kwargs):
-        return GenericModel(model_type, "raw", [[[0.0]]], 1, {"kmer": 1})
+        return GenericModel(model_type, "raw", [[[0.0] * 8]], 8, {"kmer": 1})
 
     monkeypatch.setattr("motifhorde.discovery.run_checked", fake_run_checked)
     monkeypatch.setattr("motifhorde.discovery.read_model", fake_read_model)

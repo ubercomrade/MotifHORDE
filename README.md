@@ -210,7 +210,7 @@ For command-line use with MEME/STREME, create the provided conda or mamba
 environment:
 
 ```bash
-mamba env create -f environment.yml
+conda env create -f environment.yml
 conda activate motifhorde
 ```
 
