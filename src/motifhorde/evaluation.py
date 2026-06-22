@@ -8,10 +8,9 @@ import tempfile
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
-
-from .batches import make_sequence_batch, row_values
-from .discovery import MotifDiscoveryTool
-from .functions import (
+from mimosa import GenericModel, scan_model
+from mimosa.batches import make_sequence_batch, row_values
+from mimosa.functions import (
     cut_prc,
     cut_roc,
     format_params,
@@ -20,8 +19,10 @@ from .functions import (
     roc_curve,
     standardized_pauc,
 )
+from mimosa.scanning import calculate_threshold_table
+
+from .discovery import MotifDiscoveryTool
 from .io import write_fasta
-from .models import GenericModel, calculate_threshold_table, scan_model
 
 
 def select_sequence_rows(batch, indices: Iterable[int]):
@@ -119,7 +120,12 @@ class PerformanceEvaluator:
 class Bootstrapper:
     """Run odd/even bootstrap discovery and evaluation."""
 
-    def __init__(self, discovery_tool: MotifDiscoveryTool, evaluator: PerformanceEvaluator, output_dir: str) -> None:
+    def __init__(
+        self,
+        discovery_tool: MotifDiscoveryTool,
+        evaluator: PerformanceEvaluator,
+        output_dir: str,
+    ) -> None:
         self.discovery_tool = discovery_tool
         self.evaluator = evaluator
         self.output_dir = output_dir
@@ -176,7 +182,9 @@ class Bootstrapper:
                     )
 
                     for motif in motifs:
-                        stats = self.evaluator.evaluate(motif, test_peaks, background, err_threshold)
+                        stats = self.evaluator.evaluate(
+                            motif, test_peaks, background, err_threshold
+                        )
                         motif.name = f"{motif.name}_{params_suffix}_{step_name}"
                         statistics[motif.name] = stats
 

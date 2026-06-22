@@ -1,6 +1,7 @@
 """
 Command-line interface for MotifHORDE pipeline.
 """
+
 import os
 import sys
 import shutil
@@ -34,52 +35,54 @@ from motifhorde.comparison import (
 
 def parse_range(s: str) -> List[int]:
     """Parse a range string into a list of integers for bioinformatics parameter ranges.
-    
+
     This function parses range strings in two formats:
     - Step format: 'start-end-step' (e.g., '8-20-4' becomes [8, 12, 16, 20])
     - Comma-separated format: 'value1,value2,value3' (e.g., '8,10,12')
-    
+
     Parameters
     ----------
     s : str
         Range string in format 'start-end-step' or comma-separated values
-    
+
     Returns
     -------
     List[int]
         List of integers parsed from the range string
-    
+
     Raises
     ------
     ValueError
         If the range string format is invalid
     """
-    if '-' in s and ',' not in s:
-        parts = s.split('-')
+    if "-" in s and "," not in s:
+        parts = s.split("-")
         if len(parts) != 3:
-            raise ValueError(f"Invalid format for range: {s}. Expected 'start-end-step'")
+            raise ValueError(
+                f"Invalid format for range: {s}. Expected 'start-end-step'"
+            )
         start, end, step = map(int, parts)
         return list(range(start, end + 1, step))
-    elif ',' in s:
-        return [int(x.strip()) for x in s.split(',')]
+    elif "," in s:
+        return [int(x.strip()) for x in s.split(",")]
     else:
         return [int(s)]
 
 
 def create_arg_parser() -> argparse.ArgumentParser:
     """Create and configure the command-line argument parser for MotifHORDE.
-    
+
     Sets up all required and optional arguments for the motif discovery pipeline,
     including input files, discovery tool options, evaluation parameters, and
     motif comparison methods.
-    
+
     Returns
     -------
     argparse.ArgumentParser
         Configured argument parser with all MotifHORDE options
     """
     parser = argparse.ArgumentParser(
-        description='MotifHORDE: De novo motif discovery pipeline with odd/even bootstrap validation',
+        description="MotifHORDE: De novo motif discovery pipeline with odd/even bootstrap validation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
     Examples:
@@ -99,223 +102,229 @@ def create_arg_parser() -> argparse.ArgumentParser:
       motifhorde peaks.fa bg.fa promoters.fa output/ -t bamm -l 10,12,14 -o 1,2,3
     
       # Continuous profile comparison
-      motifhorde peaks.fa bg.fa promoters.fa output/ -c continuous --c-metric co --c-perm 5000
+      motifhorde peaks.fa bg.fa promoters.fa output/ -c continuous --c-metric co
     
-      # TomTom comparison with custom threshold
-      motifhorde peaks.fa bg.fa promoters.fa output/ -c tomtom --tomtom-pval 0.0001 --tomtom-metric pcc
-    """
+      # Matrix comparison with Pearson correlation
+      motifhorde peaks.fa bg.fa promoters.fa output/ -c tomtom --tomtom-metric pcc
+    """,
     )
 
     # ========== Required arguments ==========
-    required = parser.add_argument_group('Required arguments')
+    required = parser.add_argument_group("Required arguments")
     required.add_argument(
-        'foreground',
-        help='Path to the foreground FASTA file containing peak sequences'
+        "foreground", help="Path to the foreground FASTA file containing peak sequences"
+    )
+    required.add_argument("background", help="Path to the background FASTA file")
+    required.add_argument(
+        "promoters",
+        help="Path to the promoter FASTA file used for threshold calculation",
     )
     required.add_argument(
-        'background',
-        help='Path to the background FASTA file'
-    )
-    required.add_argument(
-        'promoters',
-        help='Path to the promoter FASTA file used for threshold calculation'
-    )
-    required.add_argument(
-        'output',
-        help='Path to the output directory where results will be saved'
+        "output", help="Path to the output directory where results will be saved"
     )
 
     # ========== Discovery tool options ==========
-    discovery = parser.add_argument_group('Motif discovery options')
+    discovery = parser.add_argument_group("Motif discovery options")
     discovery.add_argument(
-        '-t', '--tool',
-        choices=['streme', 'meme', 'bamm', 'dimont', 'slim', 'sitega'],
-        default='streme',
-        help='De novo motif discovery tool to use (default: %(default)s)'
+        "-t",
+        "--tool",
+        choices=["streme", "meme", "bamm", "dimont", "slim", "sitega"],
+        default="streme",
+        help="De novo motif discovery tool to use (default: %(default)s)",
     )
     discovery.add_argument(
-        '-n', '--nmotifs',
+        "-n",
+        "--nmotifs",
         type=int,
         default=5,
-        help='Number of motifs to discover per run (default: %(default)s)'
+        help="Number of motifs to discover per run (default: %(default)s)",
     )
     discovery.add_argument(
-        '-l', '--length',
+        "-l",
+        "--length",
         type=str,
-        default='8-20-4',
-        help='Range of motif lengths to discover. Format: \'start-end-step\' (e.g., 8-20-4), comma-separated list (e.g., 8,10,12), or a single value (default: %(default)s)'
+        default="8-20-4",
+        help="Range of motif lengths to discover. Format: 'start-end-step' (e.g., 8-20-4), comma-separated list (e.g., 8,10,12), or a single value (default: %(default)s)",
     )
     discovery.add_argument(
-        '-o', '--order',
+        "-o",
+        "--order",
         type=str,
-        default='1-4-1',
-        help='Range of Markov model orders. Format: \'start-end-step\' (e.g., 1-4-1), comma-separated list (e.g., 1,2,3), or a single value (default: %(default)s)'
+        default="1-4-1",
+        help="Range of Markov model orders. Format: 'start-end-step' (e.g., 1-4-1), comma-separated list (e.g., 1,2,3), or a single value (default: %(default)s)",
     )
     discovery.add_argument(
-        '--lpd',
+        "--lpd",
         type=str,
-        default='10-40-10',
-        help='Range of locally positioned dinucleotide (LPD) distances for SiteGA. Format: \'start-end-step\', comma-separated list, or a single value (default: %(default)s)'
+        default="10-40-10",
+        help="Range of locally positioned dinucleotide (LPD) distances for SiteGA. Format: 'start-end-step', comma-separated list, or a single value (default: %(default)s)",
     )
-    discovery.add_argument('--meme-command', default=None, help='MEME executable path')
-    discovery.add_argument('--streme-command', default=None, help='STREME executable path')
-    discovery.add_argument('--bamm-command', default=None, help='BaMMmotif executable path')
-    discovery.add_argument('--dimont-jar', default=None, help='Dimont jar path')
-    discovery.add_argument('--slim-jar', default=None, help='SlimDimont jar path')
-    discovery.add_argument('--java-command', default='java', help='Java executable path or command')
-    discovery.add_argument('--java-xmx', default='4G', help='Java heap size for Jstacs tools')
-    discovery.add_argument('--meme-objfun', default='classic', help='MEME objective function')
-    discovery.add_argument('--meme-mod', default='zoops', help='MEME distribution model')
-    discovery.add_argument('--meme-minsites', type=int, default=None, help='MEME minimum number of sites')
-    discovery.add_argument('--meme-maxsites', type=int, default=None, help='MEME maximum number of sites')
-    discovery.add_argument('--meme-seed', type=int, default=None, help='MEME random seed')
-    discovery.add_argument('--meme-p', type=int, default=None, help='MEME thread count')
-    discovery.add_argument('--jstacs-threads', type=int, default=None, help='Jstacs thread count')
-    discovery.add_argument('--jstacs-position-tag', default='position', help='Jstacs FASTA position annotation tag')
-    discovery.add_argument('--jstacs-value-tag', default='value', help='Jstacs FASTA signal annotation tag')
-    discovery.add_argument('--jstacs-bg-order', type=int, default=-1, help='Jstacs background Markov order')
-    discovery.add_argument('--dimont-motif-order', type=int, default=0, help='Dimont motif Markov order')
-    discovery.add_argument('--dimont-ess', type=float, default=4.0, help='Dimont equivalent sample size')
-    discovery.add_argument('--dimont-starts', type=int, default=20, help='Dimont optimization starts')
-    discovery.add_argument('--slim-motif-order', type=int, default=-5, help='SlimDimont motif order or negative distance')
-    discovery.add_argument('--slim-starts', type=int, default=20, help='SlimDimont optimization starts')
-    discovery.add_argument('--slim-modify', action=argparse.BooleanOptionalAction, default=True, help='Enable SlimDimont shift adjustment')
+    discovery.add_argument("--meme-command", default=None, help="MEME executable path")
+    discovery.add_argument(
+        "--streme-command", default=None, help="STREME executable path"
+    )
+    discovery.add_argument(
+        "--bamm-command", default=None, help="BaMMmotif executable path"
+    )
+    discovery.add_argument("--dimont-jar", default=None, help="Dimont jar path")
+    discovery.add_argument("--slim-jar", default=None, help="SlimDimont jar path")
+    discovery.add_argument(
+        "--java-command", default="java", help="Java executable path or command"
+    )
+    discovery.add_argument(
+        "--java-xmx", default="4G", help="Java heap size for Jstacs tools"
+    )
+    discovery.add_argument(
+        "--meme-objfun", default="classic", help="MEME objective function"
+    )
+    discovery.add_argument(
+        "--meme-mod", default="zoops", help="MEME distribution model"
+    )
+    discovery.add_argument(
+        "--meme-minsites", type=int, default=None, help="MEME minimum number of sites"
+    )
+    discovery.add_argument(
+        "--meme-maxsites", type=int, default=None, help="MEME maximum number of sites"
+    )
+    discovery.add_argument(
+        "--meme-seed", type=int, default=None, help="MEME random seed"
+    )
+    discovery.add_argument("--meme-p", type=int, default=None, help="MEME thread count")
+    discovery.add_argument(
+        "--jstacs-threads", type=int, default=None, help="Jstacs thread count"
+    )
+    discovery.add_argument(
+        "--jstacs-position-tag",
+        default="position",
+        help="Jstacs FASTA position annotation tag",
+    )
+    discovery.add_argument(
+        "--jstacs-value-tag", default="value", help="Jstacs FASTA signal annotation tag"
+    )
+    discovery.add_argument(
+        "--jstacs-bg-order", type=int, default=-1, help="Jstacs background Markov order"
+    )
+    discovery.add_argument(
+        "--dimont-motif-order", type=int, default=0, help="Dimont motif Markov order"
+    )
+    discovery.add_argument(
+        "--dimont-ess", type=float, default=4.0, help="Dimont equivalent sample size"
+    )
+    discovery.add_argument(
+        "--dimont-starts", type=int, default=20, help="Dimont optimization starts"
+    )
+    discovery.add_argument(
+        "--slim-motif-order",
+        type=int,
+        default=-5,
+        help="SlimDimont motif order or negative distance",
+    )
+    discovery.add_argument(
+        "--slim-starts", type=int, default=20, help="SlimDimont optimization starts"
+    )
+    discovery.add_argument(
+        "--slim-modify",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable SlimDimont shift adjustment",
+    )
 
     # ========== Evaluation options ==========
-    evaluation = parser.add_argument_group('Evaluation options')
+    evaluation = parser.add_argument_group("Evaluation options")
     evaluation.add_argument(
-        '-f', '--fpr',
+        "-f",
+        "--fpr",
         type=float,
         default=0.001,
-        help='False Positive Rate (FPR) threshold for partial AUC calculation (default: %(default)s)'
+        help="False Positive Rate (FPR) threshold for partial AUC calculation (default: %(default)s)",
     )
     evaluation.add_argument(
-        '-b', '--background-type',
-        choices=['sites', 'peaks'],
-        default='peaks',
-        help='Method for background scoring. \'peaks\' uses the best site per sequence; \'sites\' uses all sites (default: %(default)s)'
+        "-b",
+        "--background-type",
+        choices=["sites", "peaks"],
+        default="peaks",
+        help="Method for background scoring. 'peaks' uses the best site per sequence; 'sites' uses all sites (default: %(default)s)",
     )
     evaluation.add_argument(
-        '-m', '--metric',
-        choices=['auROC', 'auPRC', 'pauROC', 'pauPRC'],
-        default='pauROC',
-        help='Performance metric used to select the best motifs (default: %(default)s)'
+        "-m",
+        "--metric",
+        choices=["auROC", "auPRC", "pauROC", "pauPRC"],
+        default="pauROC",
+        help="Performance metric used to select the best motifs (default: %(default)s)",
     )
 
     # ========== Comparison method options ==========
-    comparison = parser.add_argument_group('Motif comparison options')
+    comparison = parser.add_argument_group("Motif comparison options")
     comparison.add_argument(
-        '-c', '--comparator',
-        choices=['tomtom', 'continuous'],
-        default='tomtom',
-        help='Method used for comparing discovered motifs (default: %(default)s)'
+        "-c",
+        "--comparator",
+        choices=["tomtom", "continuous"],
+        default="tomtom",
+        help="Method used for comparing discovered motifs (default: %(default)s)",
     )
 
     # TomTom options
-    tomtom = parser.add_argument_group('TomTom comparator options')
+    tomtom = parser.add_argument_group("TomTom comparator options")
     tomtom.add_argument(
-        '--tomtom-metric',
-        choices=['pcc', 'ed'],
-        default='pcc',
-        help='Distance metric for TomTom comparison. \'pcc\' is Pearson Correlation Coefficient; \'ed\' is Euclidean Distance (default: %(default)s)'
+        "--tomtom-metric",
+        choices=["pcc", "ed"],
+        default="pcc",
+        help="Distance metric for TomTom comparison. 'pcc' is Pearson Correlation Coefficient; 'ed' is Euclidean Distance (default: %(default)s)",
     )
     tomtom.add_argument(
-        '--tomtom-pval',
-        type=float,
-        default=0.001,
-        help='P-value threshold for TomTom Monte Carlo significance (default: %(default)s)'
-    )
-    tomtom.add_argument(
-        '--tomtom-perm',
-        type=int,
-        default=1000,
-        help='Number of permutations for TomTom significance testing (default: %(default)s)'
-    )
-    tomtom.add_argument(
-        '--tomtom-permute-rows',
-        action='store_true',
-        help='Permute rows instead of columns when generating the null distribution'
-    )
-    tomtom.add_argument(
-        '--tomtom-jobs',
+        "--tomtom-jobs",
         type=int,
         default=1,
-        help='Number of parallel jobs for TomTom calculations (default: %(default)s)'
+        help="Number of parallel jobs for TomTom calculations (default: %(default)s)",
     )
     tomtom.add_argument(
-        '--pfm-mode',
-        action='store_true',
-        help='If set, derive PFMs by scanning sequences and using the top 5%% of predicted binding sites'
+        "--pfm-mode",
+        action="store_true",
+        help="If set, derive PFMs by scanning sequences and using the top 5%% of predicted binding sites",
     )
 
-    continuous = parser.add_argument_group('Continuous comparator options')
+    continuous = parser.add_argument_group("Continuous comparator options")
     continuous.add_argument(
-        '--c-metric',
-        choices=['co', 'co_rowwise', 'dice', 'dice_rowwise', 'cosine'],
-        default='co',
-        help='Metric for comparing motif score profiles (default: %(default)s)'
+        "--c-metric",
+        choices=["co", "co_rowwise", "dice", "dice_rowwise", "cosine"],
+        default="co",
+        help="Metric for comparing motif score profiles (default: %(default)s)",
     )
     continuous.add_argument(
-        '--c-perm',
-        type=int,
-        default=1000,
-        help='Number of permutations for significance testing (default: %(default)s)'
+        "--c-filter",
+        choices=["score", "none"],
+        default="none",
+        help="Criterion for filtering comparison results (default: %(default)s)",
     )
     continuous.add_argument(
-        '--c-distortion',
-        type=float,
-        default=0.4,
-        help='Distortion level applied during surrogate motif generation (default: %(default)s)'
-    )
-    continuous.add_argument(
-        '--c-filter',
-        choices=['score', 'p-value', 'none'],
-        default='p-value',
-        help='Criterion for filtering comparison results (default: %(default)s)'
-    )
-    continuous.add_argument(
-        '--c-threshold',
+        "--c-threshold",
         type=float,
         default=0.05,
-        help='Numerical threshold for the filtering criterion (default: %(default)s)'
+        help="Numerical threshold for the filtering criterion (default: %(default)s)",
     )
     continuous.add_argument(
-        '--c-search-range',
+        "--c-search-range",
         type=int,
         default=10,
-        help='Range to search for optimal offset alignment (default: %(default)s)'
+        help="Range to search for optimal offset alignment (default: %(default)s)",
     )
     continuous.add_argument(
-        '--min-kernel-size',
-        type=int,
-        default=3,
-        help='Minimum kernel size for convolution during surrogate generation (default: %(default)s)'
-    )
-    continuous.add_argument(
-        '--max-kernel-size',
-        type=int,
-        default=11,
-        help='Maximum kernel size for convolution during surrogate generation (default: %(default)s)'
-    )
-    continuous.add_argument(
-        '--c-jobs',
+        "--c-jobs",
         type=int,
         default=-1,
-        help='Number of parallel jobs for comparisons. Set to -1 to use all available cores (default: %(default)s)'
+        help="Number of parallel jobs for comparisons. Set to -1 to use all available cores (default: %(default)s)",
     )
 
     # ========== Other options ==========
-    other = parser.add_argument_group('Other options')
+    other = parser.add_argument_group("Other options")
     other.add_argument(
-        '--seed',
+        "--seed",
         type=int,
         default=None,
-        help='Random seed for reproducible results (default: %(default)s)'
+        help="Random seed for reproducible results (default: %(default)s)",
     )
     other.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose output logging'
+        "-v", "--verbose", action="store_true", help="Enable verbose output logging"
     )
 
     return parser
@@ -332,81 +341,101 @@ def _dependency_error(message: str) -> None:
 
 def check_dependencies(args) -> None:
     """Check if required external dependencies are available in the system PATH.
-    
+
     Verifies the presence of external tools needed for motif discovery based on
     the selected tool. Exits the program with an error if dependencies are missing.
-    
+
     Parameters
     ----------
     tool : str
         Name of the discovery tool to check dependencies for ('streme', 'bamm', etc.)
-    
+
     Raises
     ------
     SystemExit
         If required dependencies are not found in the system PATH
     """
-    if args.tool == 'streme':
-        command = args.streme_command or resolve_command("streme", DEFAULT_STREME_COMMAND, "HORDEMOTIFS_STREME_COMMAND")
+    if args.tool == "streme":
+        command = args.streme_command or resolve_command(
+            "streme", DEFAULT_STREME_COMMAND, "HORDEMOTIFS_STREME_COMMAND"
+        )
         if not _command_exists(command):
             _dependency_error(f"STREME dependency missing: {command}")
-    elif args.tool == 'meme':
-        command = args.meme_command or resolve_command("meme", DEFAULT_MEME_COMMAND, "HORDEMOTIFS_MEME_COMMAND")
+    elif args.tool == "meme":
+        command = args.meme_command or resolve_command(
+            "meme", DEFAULT_MEME_COMMAND, "HORDEMOTIFS_MEME_COMMAND"
+        )
         if not _command_exists(command):
             _dependency_error(f"MEME dependency missing: {command}")
-    elif args.tool == 'bamm':
-        streme = args.streme_command or resolve_command("streme", DEFAULT_STREME_COMMAND, "HORDEMOTIFS_STREME_COMMAND")
-        bamm = args.bamm_command or resolve_command(DEFAULT_BAMM_COMMAND, DEFAULT_BAMM_COMMAND, "HORDEMOTIFS_BAMM_COMMAND")
+    elif args.tool == "bamm":
+        streme = args.streme_command or resolve_command(
+            "streme", DEFAULT_STREME_COMMAND, "HORDEMOTIFS_STREME_COMMAND"
+        )
+        bamm = args.bamm_command or resolve_command(
+            DEFAULT_BAMM_COMMAND, DEFAULT_BAMM_COMMAND, "HORDEMOTIFS_BAMM_COMMAND"
+        )
         if not _command_exists(streme):
-            _dependency_error(f"STREME dependency missing for BaMM initialization: {streme}")
+            _dependency_error(
+                f"STREME dependency missing for BaMM initialization: {streme}"
+            )
         if not _command_exists(bamm):
             _dependency_error(f"BaMMmotif dependency missing: {bamm}")
-    elif args.tool == 'dimont':
+    elif args.tool == "dimont":
         java = resolve_command(args.java_command)
         if not _command_exists(java):
             _dependency_error(f"Java dependency missing: {java}")
         try:
-            resolve_existing_path(args.dimont_jar, "HORDEMOTIFS_DIMONT_JAR", DEFAULT_DIMONT_JAR, "Dimont jar")
+            resolve_existing_path(
+                args.dimont_jar,
+                "HORDEMOTIFS_DIMONT_JAR",
+                DEFAULT_DIMONT_JAR,
+                "Dimont jar",
+            )
         except FileNotFoundError as exc:
             _dependency_error(str(exc))
-    elif args.tool == 'slim':
+    elif args.tool == "slim":
         java = resolve_command(args.java_command)
         if not _command_exists(java):
             _dependency_error(f"Java dependency missing: {java}")
         try:
-            resolve_existing_path(args.slim_jar, "HORDEMOTIFS_SLIM_JAR", DEFAULT_SLIM_JAR, "SlimDimont jar")
+            resolve_existing_path(
+                args.slim_jar,
+                "HORDEMOTIFS_SLIM_JAR",
+                DEFAULT_SLIM_JAR,
+                "SlimDimont jar",
+            )
         except FileNotFoundError as exc:
             _dependency_error(str(exc))
-    elif args.tool == 'sitega':
+    elif args.tool == "sitega":
         if shutil.which("andy05cell.exe") is None:
             _dependency_error("SiteGA executable missing: andy05cell.exe")
 
 
 def setup_discovery_tool(args) -> Any:
     """Initialize and return the appropriate motif discovery tool instance.
-    
+
     Creates an instance of the specified discovery tool class based on command-line
     arguments, configuring it with the appropriate parameters.
-    
+
     Parameters
     ----------
     args : argparse.Namespace
         Parsed command-line arguments containing tool configuration
-    
+
     Returns
     -------
     Any
         Instance of the appropriate discovery tool class (StremeDiscoveryTool,
         BammDiscoveryTool, or SitegaDiscoveryTool)
-    
+
     Raises
     ------
     ValueError
         If an unknown tool name is specified in the arguments
     """
-    if args.tool == 'streme':
+    if args.tool == "streme":
         return StremeDiscoveryTool(nmotifs=args.nmotifs, command=args.streme_command)
-    elif args.tool == 'meme':
+    elif args.tool == "meme":
         return MemeDiscoveryTool(
             command=args.meme_command,
             objfun=args.meme_objfun,
@@ -416,9 +445,11 @@ def setup_discovery_tool(args) -> Any:
             seed=args.meme_seed,
             threads=args.meme_p,
         )
-    elif args.tool == 'bamm':
-        return BammDiscoveryTool(bamm_command=args.bamm_command, streme_command=args.streme_command)
-    elif args.tool == 'dimont':
+    elif args.tool == "bamm":
+        return BammDiscoveryTool(
+            bamm_command=args.bamm_command, streme_command=args.streme_command
+        )
+    elif args.tool == "dimont":
         return DimontDiscoveryTool(
             jar_path=args.dimont_jar,
             java_command=args.java_command,
@@ -431,7 +462,7 @@ def setup_discovery_tool(args) -> Any:
             ess=args.dimont_ess,
             starts=args.dimont_starts,
         )
-    elif args.tool == 'slim':
+    elif args.tool == "slim":
         return SlimDiscoveryTool(
             jar_path=args.slim_jar,
             java_command=args.java_command,
@@ -444,7 +475,7 @@ def setup_discovery_tool(args) -> Any:
             modify=args.slim_modify,
             starts=args.slim_starts,
         )
-    elif args.tool == 'sitega':
+    elif args.tool == "sitega":
         return SitegaDiscoveryTool(nmotifs=args.nmotifs)
     else:
         raise ValueError(f"Unknown tool: {args.tool}")
@@ -452,70 +483,62 @@ def setup_discovery_tool(args) -> Any:
 
 def setup_evaluator(args) -> PerformanceEvaluator:
     """Initialize and return the performance evaluator instance.
-    
+
     Creates an instance of the PerformanceEvaluator class configured with
     parameters from the command-line arguments.
-    
+
     Parameters
     ----------
     args : argparse.Namespace
         Parsed command-line arguments containing evaluator configuration
-    
+
     Returns
     -------
     PerformanceEvaluator
         Configured performance evaluator instance
     """
-    return PerformanceEvaluator(
-        background_type=args.background_type
-    )
+    return PerformanceEvaluator(background_type=args.background_type)
 
 
 def setup_comparator(args) -> Any:
     """Initialize and return the appropriate motif comparison tool instance.
-    
+
     Creates an instance of the specified comparator class based on command-line
     arguments, configuring it with the appropriate parameters for motif comparison.
-    
+
     Parameters
     ----------
     args : argparse.Namespace
         Parsed command-line arguments containing comparator configuration
-    
+
     Returns
     -------
     Any
         Instance of the appropriate comparator class.
-    
+
     Raises
     ------
     ValueError
         If an unknown comparator name is specified in the arguments
     """
-    if args.comparator == 'tomtom':
+    if args.comparator == "tomtom":
         return TomtomComparator(
             metric=args.tomtom_metric,
-            n_permutations=args.tomtom_perm,
-            permute_rows=args.tomtom_permute_rows,
             n_jobs=args.tomtom_jobs,
-            seed=args.seed
+            seed=args.seed,
+            pfm_mode=args.pfm_mode,
         )
 
-    elif args.comparator == 'continuous':
-        filter_type = None if args.c_filter == 'none' else args.c_filter
+    elif args.comparator == "continuous":
+        filter_type = None if args.c_filter == "none" else args.c_filter
         return UniversalMotifComparator(
             name=f"{args.comparator}_comparator",
             metric=args.c_metric,
-            n_permutations=args.c_perm,
-            distortion_level=args.c_distortion,
             n_jobs=args.c_jobs,
             seed=args.seed,
             filter_type=filter_type,
             filter_threshold=args.c_threshold,
-            min_kernel_size=args.min_kernel_size,
-            max_kernel_size=args.max_kernel_size,
-            search_range=args.c_search_range
-
+            search_range=args.c_search_range,
         )
 
     else:
@@ -524,16 +547,16 @@ def setup_comparator(args) -> Any:
 
 def setup_discovery_params(args) -> Dict[str, List[Any]]:
     """Create a dictionary of discovery parameters based on tool and arguments.
-    
+
     Parses command-line arguments to generate a parameter dictionary for the
     motif discovery process, handling different parameter types based on the
     selected discovery tool.
-    
+
     Parameters
     ----------
     args : argparse.Namespace
         Parsed command-line arguments containing discovery parameter specifications
-    
+
     Returns
     -------
     Dict[str, List[Any]]
@@ -544,25 +567,31 @@ def setup_discovery_params(args) -> Dict[str, List[Any]]:
 
     # Parse length parameter (common for all tools)
     try:
-        params['length'] = parse_range(args.length)
+        params["length"] = parse_range(args.length)
     except ValueError as _:
-        print(f"ERROR: Invalid format for --length: {args.length}. Expected 'start-end-step' or comma-separated values")
+        print(
+            f"ERROR: Invalid format for --length: {args.length}. Expected 'start-end-step' or comma-separated values"
+        )
         sys.exit(1)
 
     # Parse order parameter (for Markov-based models)
-    if args.tool in ['bamm']:
+    if args.tool in ["bamm"]:
         try:
-            params['order'] = parse_range(args.order)
+            params["order"] = parse_range(args.order)
         except ValueError as _:
-            print(f"ERROR: Invalid format for --order: {args.order}. Expected 'start-end-step' or comma-separated values")
+            print(
+                f"ERROR: Invalid format for --order: {args.order}. Expected 'start-end-step' or comma-separated values"
+            )
             sys.exit(1)
 
     # Parse LPD parameter (for SiteGA)
-    if args.tool == 'sitega':
+    if args.tool == "sitega":
         try:
-            params['lpd'] = parse_range(args.lpd)
+            params["lpd"] = parse_range(args.lpd)
         except ValueError as _:
-            print(f"ERROR: Invalid format for --lpd: {args.lpd}. Expected 'start-end-step' or comma-separated values")
+            print(
+                f"ERROR: Invalid format for --lpd: {args.lpd}. Expected 'start-end-step' or comma-separated values"
+            )
             sys.exit(1)
 
     if args.verbose:
@@ -575,7 +604,7 @@ def setup_discovery_params(args) -> Dict[str, List[Any]]:
 
 def main_cli():
     """Main command-line interface entry point for the MotifHORDE pipeline.
-    
+
     Orchestrates the complete motif discovery pipeline by parsing command-line
     arguments, validating inputs, setting up pipeline components, and executing
     the discovery process.
@@ -639,7 +668,7 @@ def main_cli():
         promoters_path=args.promoters,
         output_dir=args.output,
         discovery_params=discovery_params,
-        metric=args.metric
+        metric=args.metric,
     )
 
     if args.verbose:
@@ -649,5 +678,5 @@ def main_cli():
         print("=" * 60)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main_cli()

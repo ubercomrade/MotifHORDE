@@ -148,8 +148,6 @@ supports:
 
 - `--tomtom-metric pcc` for Pearson correlation;
 - `--tomtom-metric ed` for negative Euclidean distance;
-- column permutation-based Monte Carlo null scores with `--tomtom-perm`;
-- optional row permutation with `--tomtom-permute-rows`;
 - optional PFM reconstruction with `--pfm-mode`.
 
 When `--pfm-mode` is enabled, or when two models have different type keys, the
@@ -157,10 +155,10 @@ comparison derives PFMs by scanning sequences and using the top-scoring predicte
 sites. This makes heterogeneous model comparison possible without requiring both
 models to share the same internal representation.
 
-The CLI exposes `--tomtom-pval` for compatibility with existing invocations, but
-pipeline selection uses the fixed method-level similarity rule: `p-value <=
-0.001` when p-values are available, otherwise `score >= 0.9`. Tomtom-like
-results are sorted by p-value when Monte Carlo p-values are present.
+Pipeline selection uses the fixed method-level similarity rule: `p-value <=
+0.001` when MIMOSA null distributions are configured, otherwise `score >= 0.9`.
+Tomtom-like results are sorted by p-value when distribution-backed p-values are
+present.
 
 ### Continuous Profile Comparator
 
@@ -176,10 +174,9 @@ Supported metrics:
 - `dice_rowwise`: row-wise continuous Dice;
 - `cosine`: row-wise cosine similarity.
 
-Profile comparison supports Monte Carlo null estimation through surrogate
-profile generation. The surrogate generator applies randomized convolutional
-distortion controlled by `--c-distortion`, `--min-kernel-size`, and
-`--max-kernel-size`.
+Profile comparison uses the MIMOSA profile runtime directly. Significance
+estimation should be configured through MIMOSA null distributions rather than
+the removed local Monte Carlo surrogate generator.
 
 ## Evaluation
 
@@ -286,8 +283,7 @@ motifhorde peaks.fa background.fa promoters.fa output/ \
   -t dimont \
   -l 10,12,14 \
   -c continuous \
-  --c-metric co \
-  --c-perm 1000
+  --c-metric co
 
 # Jstacs tools with explicit Java settings
 motifhorde peaks.fa background.fa promoters.fa output/ \
@@ -357,14 +353,11 @@ Direct comparison API:
 ```python
 from motifhorde.comparison import TomtomComparator, UniversalMotifComparator
 
-tomtom = TomtomComparator(metric="pcc", n_permutations=1000, seed=1)
+tomtom = TomtomComparator(metric="pcc", seed=1)
 matrix_results = tomtom.compare([model_a], [model_b], sequences=sequences)
 
 continuous = UniversalMotifComparator(
     metric="co",
-    n_permutations=1000,
-    filter_type="p-value",
-    filter_threshold=0.05,
     seed=1,
 )
 profile_results = continuous.compare([model_a], [model_b], sequences=sequences)
@@ -381,7 +374,7 @@ from motifhorde.pipeline import DeNovoPipeline
 pipeline = DeNovoPipeline(
     discovery_tool=StremeDiscoveryTool(),
     evaluator=PerformanceEvaluator(background_type="peaks"),
-    comparator=TomtomComparator(metric="pcc", n_permutations=1000),
+    comparator=TomtomComparator(metric="pcc"),
     fpr_threshold=0.001,
     number_of_motifs=5,
 )

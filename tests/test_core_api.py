@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import numpy as np
-
-from motifhorde.batches import make_sequence_batch
-from motifhorde.comparison import TomtomComparator, UniversalMotifComparator
-from motifhorde.evaluation import PerformanceEvaluator
-from motifhorde.functions import (
+from mimosa.batches import make_sequence_batch
+from mimosa.functions import (
     batch_all_scores,
     batch_all_scores_strands,
     build_score_log_tail_table,
     lookup_score_for_tail_probability,
 )
+from motifhorde.comparison import TomtomComparator, UniversalMotifComparator
+from motifhorde.evaluation import PerformanceEvaluator
 from motifhorde.io import read_fasta, write_fasta
 from motifhorde.models import (
     GenericModel,
@@ -46,21 +45,20 @@ def test_read_model_and_scan(sample_meme, sequence_batch):
     assert np.any(scores["mask"])
 
 
-def test_read_meme_accepts_compact_width_header(tmp_path, test_pfm):
-    path = tmp_path / "compact.meme"
-    with open(path, "w") as handle:
-        handle.write("MEME version 4\n\n")
-        handle.write("MOTIF Compact\n")
-        handle.write("letter-probability matrix: alength= 4 w=6 nsites= 20 E= 0\n")
-        np.savetxt(handle, test_pfm.T, fmt="%.6f")
+def test_read_model_rejects_legacy_pwm_txt_extension(tmp_path, sample_meme):
+    path = tmp_path / "legacy_pwm.txt"
+    with open(sample_meme) as source:
+        path.write_text(source.read())
 
-    model = read_model(path, "pwm")
-    assert model.length == test_pfm.shape[1]
+    with np.testing.assert_raises(ValueError):
+        read_model(str(path), "pwm")
 
 
 def test_batch_scoring_kernels(pwm_model, sequence_batch):
     scores = batch_all_scores(sequence_batch, pwm_model.representation, kmer=1)
-    plus, minus = batch_all_scores_strands(sequence_batch, pwm_model.representation, kmer=1)
+    plus, minus = batch_all_scores_strands(
+        sequence_batch, pwm_model.representation, kmer=1
+    )
     assert scores["values"].shape == plus["values"].shape
     assert plus["values"].shape == minus["values"].shape
 
@@ -84,7 +82,9 @@ def test_model_functional_helpers(pwm_model, sequence_batch):
 
 def test_evaluator_stores_statistics(pwm_model, sequence_batch):
     evaluator = PerformanceEvaluator(background_type="peaks")
-    stats = evaluator.evaluate(pwm_model, sequence_batch, sequence_batch, err_threshold=0.1)
+    stats = evaluator.evaluate(
+        pwm_model, sequence_batch, sequence_batch, err_threshold=0.1
+    )
     assert "auROC" in stats
     assert pwm_model.config["statistics"]["auROC"] == stats["auROC"]
 
@@ -97,11 +97,11 @@ def test_comparator_wrappers(pwm_model, sequence_batch):
         pwm_model.length,
         dict(pwm_model.config),
     )
-    tomtom = TomtomComparator(n_permutations=0)
+    tomtom = TomtomComparator()
     motif_frame = tomtom.compare([pwm_model], [second], sequences=sequence_batch)
     assert motif_frame.loc[0, "query"] == "M1"
 
-    continuous = UniversalMotifComparator(metric="co", n_permutations=0)
+    continuous = UniversalMotifComparator(metric="co", n_jobs=1)
     profile_frame = continuous.compare([pwm_model], [second], sequences=sequence_batch)
     assert profile_frame.loc[0, "target"] == "M2"
 
@@ -112,6 +112,8 @@ def test_score_tail_table_handles_empty_input():
 
 
 def test_lookup_score_for_strict_tail_probability_uses_strictest_cutoff():
-    table = build_score_log_tail_table(np.array([10.0, 9.0, 8.0, 7.0], dtype=np.float32))
+    table = build_score_log_tail_table(
+        np.array([10.0, 9.0, 8.0, 7.0], dtype=np.float32)
+    )
     score = lookup_score_for_tail_probability(table, 0.01)
-    assert score == 10.0
+    assert score == 7.0

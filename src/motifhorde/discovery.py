@@ -9,6 +9,8 @@ import shutil
 from abc import ABC, abstractmethod
 from typing import List
 
+from mimosa import GenericModel, read_model
+
 from .execute import run_sitega
 from .external import (
     DEFAULT_BAMM_COMMAND,
@@ -21,7 +23,6 @@ from .external import (
     run_checked,
 )
 from .io import write_jstacs_fasta
-from .models import GenericModel, read_model
 
 logger = logging.getLogger(__name__)
 
@@ -180,8 +181,12 @@ class StremeDiscoveryTool(MotifDiscoveryTool):
         **kwargs,
     ) -> List[GenericModel]:
         length = _require_length(kwargs)
-        tmp_meme = _run_streme(foreground, background, output_dir, length, number_of_motifs, self.command)
-        return _read_indexed_models(tmp_meme, "pwm", "Streme", number_of_motifs, expected_length=length)
+        tmp_meme = _run_streme(
+            foreground, background, output_dir, length, number_of_motifs, self.command
+        )
+        return _read_indexed_models(
+            tmp_meme, "pwm", "Streme", number_of_motifs, expected_length=length
+        )
 
 
 class MemeDiscoveryTool(MotifDiscoveryTool):
@@ -218,7 +223,9 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
         tmp_meme = os.path.join(output_dir, "motifs.meme")
-        command = self.command or resolve_command("meme", DEFAULT_MEME_COMMAND, "HORDEMOTIFS_MEME_COMMAND")
+        command = self.command or resolve_command(
+            "meme", DEFAULT_MEME_COMMAND, "HORDEMOTIFS_MEME_COMMAND"
+        )
         meme_args = [
             command,
             foreground,
@@ -255,13 +262,17 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
                 handle.write(result.stdout)
         elif os.path.exists(os.path.join(output_dir, "meme.txt")):
             tmp_meme = os.path.join(output_dir, "meme.txt")
-        return _read_indexed_models(tmp_meme, "pwm", "Meme", number_of_motifs, expected_length=length)
+        return _read_indexed_models(
+            tmp_meme, "pwm", "Meme", number_of_motifs, expected_length=length
+        )
 
 
 class BammDiscoveryTool(MotifDiscoveryTool):
     """Wrapper around BaMM motif discovery."""
 
-    def __init__(self, bamm_command: str | None = None, streme_command: str | None = None) -> None:
+    def __init__(
+        self, bamm_command: str | None = None, streme_command: str | None = None
+    ) -> None:
         super().__init__(name="bamm")
         self.bamm_command = bamm_command
         self.streme_command = streme_command
@@ -278,7 +289,14 @@ class BammDiscoveryTool(MotifDiscoveryTool):
         length = _require_length(kwargs)
         order = int(kwargs.get("order", 2))
 
-        tmp_meme = _run_streme(foreground, background, output_dir, length, number_of_motifs, self.streme_command)
+        tmp_meme = _run_streme(
+            foreground,
+            background,
+            output_dir,
+            length,
+            number_of_motifs,
+            self.streme_command,
+        )
         if not os.path.exists(tmp_meme) or os.path.getsize(tmp_meme) == 0:
             return []
 
@@ -461,8 +479,12 @@ class DimontDiscoveryTool(MotifDiscoveryTool):
             self.threads,
         )
         run_checked(cmd)
-        paths = _existing_xml_paths(output_dir, ["*dimont*.xml", "*Dimont*.xml", "*.xml"])
-        return _read_xml_models(paths, "dimont", "Dimont", number_of_motifs, expected_length=length)
+        paths = _existing_xml_paths(
+            output_dir, ["*dimont*.xml", "*Dimont*.xml", "*.xml"]
+        )
+        return _read_xml_models(
+            paths, "dimont", "Dimont", number_of_motifs, expected_length=length
+        )
 
 
 class SlimDiscoveryTool(MotifDiscoveryTool):
@@ -535,7 +557,9 @@ class SlimDiscoveryTool(MotifDiscoveryTool):
         )
         run_checked(cmd)
         paths = _existing_xml_paths(output_dir, ["*slim*.xml", "*Slim*.xml", "*.xml"])
-        return _read_xml_models(paths, "slim", "Slim", number_of_motifs, expected_length=length)
+        return _read_xml_models(
+            paths, "slim", "Slim", number_of_motifs, expected_length=length
+        )
 
 
 class SitegaDiscoveryTool(MotifDiscoveryTool):
@@ -562,7 +586,9 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         run_sitega(output_dir, length, number_of_lpd, number_of_motifs)
 
         motifs: List[GenericModel] = []
-        for index, path in enumerate(sorted(glob.glob(os.path.join(output_dir, "train.fa_mat*"))), start=1):
+        for index, path in enumerate(
+            sorted(glob.glob(os.path.join(output_dir, "train.fa_mat*"))), start=1
+        ):
             motif = read_model(path, "sitega")
             motif.name = f"Sitega-{index}"
             if _has_expected_length(motif, length):

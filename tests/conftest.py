@@ -4,9 +4,9 @@ import os
 
 import numpy as np
 import pytest
+from mimosa.batches import make_sequence_batch
+from mimosa.functions import pfm_to_pwm
 
-from motifhorde.batches import make_sequence_batch
-from motifhorde.functions import pfm_to_pwm
 from motifhorde.models import GenericModel
 
 
@@ -27,7 +27,13 @@ def test_pfm():
 def pwm_model(test_pfm):
     pwm = pfm_to_pwm(test_pfm)
     representation = np.concatenate((pwm, np.min(pwm, axis=0, keepdims=True)), axis=0)
-    return GenericModel("pwm", "M1", representation.astype(np.float32), test_pfm.shape[1], {"kmer": 1, "_source_pfm": test_pfm})
+    return GenericModel(
+        "pwm",
+        "M1",
+        representation.astype(np.float32),
+        test_pfm.shape[1],
+        {"kmer": 1, "_source_pfm": test_pfm},
+    )
 
 
 @pytest.fixture
@@ -38,7 +44,9 @@ def sequence_batch():
         "TTTTTTTTTTTT",
         "AAAAAACCCCCC",
     ]
-    return make_sequence_batch(np.array([mapping[base] for base in seq], dtype=np.int8) for seq in seqs)
+    return make_sequence_batch(
+        np.array([mapping[base] for base in seq], dtype=np.int8) for seq in seqs
+    )
 
 
 @pytest.fixture

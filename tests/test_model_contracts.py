@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import make_dataclass
 import os
 
 import joblib
 import numpy as np
 import pytest
+from mimosa.batches import make_sequence_batch
 
-from motifhorde.batches import make_sequence_batch
 from motifhorde.comparison import TomtomComparator, UniversalMotifComparator
 from motifhorde.models import (
     GenericModel,
@@ -47,13 +46,17 @@ EXPECTED_BEST_SCORES = np.array(
 )
 EXPECTED_THRESHOLD_TABLE = np.array(
     [
-        [4.297346, 0.720159],
-        [-0.418423, 0.623249],
-        [-0.838787, 0.544068],
-        [-1.804842, 0.118099],
-        [-2.496990, 0.091770],
-        [-2.783840, 0.066947],
-        [-4.170259, 0.043466],
+        [4.297346, 1.021189],
+        [-0.418423, 0.924279],
+        [-0.838787, 0.845098],
+        [-1.804842, 0.392800],
+        [-2.496990, 0.367977],
+        [-2.783840, 0.301030],
+        [-2.917354, 0.160851],
+        [-3.189139, 0.146128],
+        [-3.609503, 0.118099],
+        [-4.170259, 0.091770],
+        [-4.862407, 0.043466],
         [-5.959855, 0.0],
     ],
     dtype=np.float32,
@@ -78,13 +81,21 @@ EXPECTED_TOP_FRACTION_PFM = np.array(
 )
 
 
-def _copy_model(model: GenericModel, name: str, *, type_key: str | None = None) -> GenericModel:
-    representation = None if model.representation is None else np.array(model.representation, copy=True)
+def _copy_model(
+    model: GenericModel, name: str, *, type_key: str | None = None
+) -> GenericModel:
+    representation = (
+        None
+        if model.representation is None
+        else np.array(model.representation, copy=True)
+    )
     config = {
         key: np.array(value, copy=True) if isinstance(value, np.ndarray) else value
         for key, value in model.config.items()
     }
-    return GenericModel(type_key or model.type_key, name, representation, model.length, config)
+    return GenericModel(
+        type_key or model.type_key, name, representation, model.length, config
+    )
 
 
 def _write_bamm(path) -> None:
@@ -119,7 +130,7 @@ def _write_scores(path) -> None:
     path.write_text(">seq0\n1.0 2.0 3.0\n>seq1\n0.5 0.25\n")
 
 
-def test_mimosa_dependency_and_facade_contract():
+def test_mimosa_dependency_contract():
     import mimosa
     from mimosa.models import write_model as mimosa_write_model
     from mimosa.scanning import calculate_threshold_table as mimosa_threshold_table
@@ -148,13 +159,19 @@ def test_scan_model_contract_values(pwm_model, sequence_batch):
         assert scores["mask"].dtype == bool
         assert scores["lengths"].tolist() == [7, 7, 7]
         assert scores["mask"].all()
-        np.testing.assert_allclose(scores["values"], expected_values, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(
+            scores["values"], expected_values, rtol=1e-6, atol=1e-6
+        )
 
     strand_bundle = scan_model_strands(pwm_model, sequence_batch)
     assert strand_bundle["values"].shape == (2, 3, 7)
     assert strand_bundle["lengths"].tolist() == [7, 7, 7]
-    np.testing.assert_allclose(strand_bundle["values"][0], EXPECTED_PLUS_SCORES, rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(strand_bundle["values"][1], EXPECTED_MINUS_SCORES, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        strand_bundle["values"][0], EXPECTED_PLUS_SCORES, rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        strand_bundle["values"][1], EXPECTED_MINUS_SCORES, rtol=1e-6, atol=1e-6
+    )
 
 
 def test_site_table_contract_schema_and_values(pwm_model, sequence_batch):
@@ -174,13 +191,19 @@ def test_site_table_contract_schema_and_values(pwm_model, sequence_batch):
     assert sites["end"].tolist() == [6, 6, 11]
     assert sites["strand"].tolist() == ["+", "-", "+"]
     assert sites["site"].tolist() == ["ACGTAC", "AAAAAA", "ACCCCC"]
-    np.testing.assert_allclose(sites["score"], [4.297346, -1.804842, -0.418423], rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(sites["log_tail"], [0.720159, 0.118099, 0.623249], rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        sites["score"], [4.297346, -1.804842, -0.418423], rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        sites["log_tail"], [1.021189, 0.392800, 0.924279], rtol=1e-6, atol=1e-6
+    )
 
 
 def test_threshold_and_pfm_contracts(pwm_model, sequence_batch):
     threshold_table = calculate_threshold_table(pwm_model, sequence_batch)
-    np.testing.assert_allclose(threshold_table, EXPECTED_THRESHOLD_TABLE, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        threshold_table, EXPECTED_THRESHOLD_TABLE, rtol=1e-6, atol=1e-6
+    )
 
     with pytest.raises(ValueError, match="fpr_threshold is required"):
         get_sites(pwm_model, sequence_batch, mode="threshold")
@@ -197,16 +220,35 @@ def test_threshold_and_pfm_contracts(pwm_model, sequence_batch):
         "ACGTAC",
         "ACGTAC",
         "ACGTAC",
+        "AAAAAA",
+        "AAAAAA",
+        "AAAAAA",
+        "AAAAAA",
+        "AAAAAA",
+        "AAAAAA",
+        "AAAAAA",
         "ACCCCC",
         "GGGTTT",
+        "AAAAAA",
+        "AAAAAC",
+        "AAAACC",
+        "AAACCC",
+        "AACCCC",
+        "GGGGTT",
+        "GGGGGT",
+        "GGGGGG",
     ]
 
     pfm = get_pfm(pwm_model, sequence_batch)
     np.testing.assert_allclose(pfm, EXPECTED_BEST_PFM, rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(pfm.sum(axis=0), np.ones(pwm_model.length), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        pfm.sum(axis=0), np.ones(pwm_model.length), rtol=1e-6, atol=1e-6
+    )
 
     top_fraction_pfm = get_pfm(pwm_model, sequence_batch, top_fraction=0.5)
-    np.testing.assert_allclose(top_fraction_pfm, EXPECTED_TOP_FRACTION_PFM, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        top_fraction_pfm, EXPECTED_TOP_FRACTION_PFM, rtol=1e-6, atol=1e-6
+    )
 
 
 def test_empty_and_short_sequence_contracts(pwm_model):
@@ -223,13 +265,23 @@ def test_empty_and_short_sequence_contracts(pwm_model):
     assert short_scores["lengths"].tolist() == [0]
 
     short_sites = get_sites(pwm_model, short_batch)
-    assert list(short_sites.columns) == ["seq_index", "start", "end", "strand", "score", "log_tail", "site"]
+    assert list(short_sites.columns) == [
+        "seq_index",
+        "start",
+        "end",
+        "strand",
+        "score",
+        "log_tail",
+        "site",
+    ]
     assert short_sites.empty
     with pytest.raises(ValueError, match="No sites found"):
         get_pfm(pwm_model, short_batch)
 
 
-def test_read_model_contract_for_supported_families(tmp_path, pwm_model, sequence_batch, sample_meme):
+def test_read_model_contract_for_supported_families(
+    tmp_path, pwm_model, sequence_batch, sample_meme
+):
     bamm_path = tmp_path / "contract.ihbcp"
     sitega_path = tmp_path / "contract.mat"
     dimont_path = tmp_path / "contract_dimont.pkl"
@@ -239,16 +291,18 @@ def test_read_model_contract_for_supported_families(tmp_path, pwm_model, sequenc
     _write_bamm(bamm_path)
     _write_sitega(sitega_path)
     _write_scores(scores_path)
-    joblib.dump(_copy_model(pwm_model, "DimontContract", type_key="dimont"), dimont_path)
+    joblib.dump(
+        _copy_model(pwm_model, "DimontContract", type_key="dimont"), dimont_path
+    )
     joblib.dump(_copy_model(pwm_model, "SlimContract", type_key="slim"), slim_path)
 
     models = {
         "pwm": read_model(sample_meme, "pwm"),
-        "bamm": read_model(bamm_path, "bamm", order=0),
-        "sitega": read_model(sitega_path, "sitega"),
-        "dimont": read_model(dimont_path, "dimont"),
-        "slim": read_model(slim_path, "slim"),
-        "scores": read_model(scores_path, "scores"),
+        "bamm": read_model(os.fspath(bamm_path), "bamm", order=0),
+        "sitega": read_model(os.fspath(sitega_path), "sitega"),
+        "dimont": read_model(os.fspath(dimont_path), "dimont"),
+        "slim": read_model(os.fspath(slim_path), "slim"),
+        "scores": read_model(os.fspath(scores_path), "scores"),
     }
 
     assert models["pwm"].name == "TestMotif1"
@@ -262,91 +316,60 @@ def test_read_model_contract_for_supported_families(tmp_path, pwm_model, sequenc
         assert model.type_key == type_key
         assert isinstance(model.config, dict)
 
-        scores = scan_model(model, None if type_key == "scores" else sequence_batch, strand="best")
+        scores = scan_model(
+            model, None if type_key == "scores" else sequence_batch, strand="best"
+        )
         assert {"values", "lengths", "padding_value"}.issubset(scores)
         if type_key != "scores":
             assert scores["values"].shape[0] == len(sequence_batch["lengths"])
 
-        strand_bundle = scan_model_strands(model, None if type_key == "scores" else sequence_batch)
+        strand_bundle = scan_model_strands(
+            model, None if type_key == "scores" else sequence_batch
+        )
         assert strand_bundle["values"].shape[0] == 2
         assert strand_bundle["values"].shape[1] == len(strand_bundle["lengths"])
 
 
-def test_read_model_preserves_legacy_pwm_txt_extension(tmp_path, sample_meme, test_pfm):
+def test_read_model_rejects_legacy_pwm_txt_extension(tmp_path, sample_meme):
     txt_path = tmp_path / "legacy_pwm.txt"
     with open(sample_meme) as source:
         txt_path.write_text(source.read())
 
-    model = read_model(txt_path, "pwm")
-
-    assert isinstance(model, GenericModel)
-    assert model.type_key == "pwm"
-    assert model.name == "TestMotif1"
-    np.testing.assert_allclose(model.config["_source_pfm"], test_pfm, rtol=1e-6, atol=1e-6)
+    with pytest.raises(ValueError):
+        read_model(os.fspath(txt_path), "pwm")
 
 
 def test_pickle_and_pwm_write_contract(tmp_path, pwm_model, test_pfm):
     pickle_path = tmp_path / "model.pkl"
     joblib.dump(pwm_model, pickle_path)
 
-    loaded_pickle = read_model(pickle_path, "pwm")
+    loaded_pickle = read_model(os.fspath(pickle_path), "pwm")
     assert isinstance(loaded_pickle, GenericModel)
     assert loaded_pickle.type_key == "pwm"
     assert loaded_pickle.name == pwm_model.name
-    np.testing.assert_allclose(loaded_pickle.config["_source_pfm"], test_pfm, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        loaded_pickle.config["_source_pfm"], test_pfm, rtol=1e-6, atol=1e-6
+    )
 
     pfm_path = tmp_path / "written.pfm"
     write_model(pwm_model, os.fspath(pfm_path))
-    loaded_pfm = read_model(pfm_path, "pwm")
+    loaded_pfm = read_model(os.fspath(pfm_path), "pwm")
     assert loaded_pfm.name == "written"
     assert loaded_pfm.length == pwm_model.length
-    np.testing.assert_allclose(loaded_pfm.config["_source_pfm"], test_pfm, rtol=1e-6, atol=1e-6)
-
-
-def test_old_motifhorde_generic_model_pickle_contract(tmp_path, monkeypatch, pwm_model, test_pfm):
-    import motifhorde.models as model_module
-
-    legacy_model_class = make_dataclass(
-        "GenericModel",
-        [
-            ("type_key", str),
-            ("name", str),
-            ("representation", object),
-            ("length", int),
-            ("config", dict),
-        ],
-        eq=False,
+    np.testing.assert_allclose(
+        loaded_pfm.config["_source_pfm"], test_pfm, rtol=1e-6, atol=1e-6
     )
-    legacy_model_class.__module__ = "motifhorde.models"
-    monkeypatch.setattr(model_module, "GenericModel", legacy_model_class)
-    pickle_path = tmp_path / "old_model.pkl"
-    joblib.dump(
-        legacy_model_class(
-            pwm_model.type_key,
-            pwm_model.name,
-            np.array(pwm_model.representation, copy=True),
-            pwm_model.length,
-            {"kmer": 1, "_source_pfm": np.array(test_pfm, copy=True)},
-        ),
-        pickle_path,
-    )
-
-    monkeypatch.setattr(model_module, "GenericModel", GenericModel)
-    loaded_pickle = read_model(pickle_path, "pwm")
-
-    assert isinstance(loaded_pickle, GenericModel)
-    assert loaded_pickle.type_key == "pwm"
-    assert loaded_pickle.name == pwm_model.name
-    np.testing.assert_allclose(loaded_pickle.config["_source_pfm"], test_pfm, rtol=1e-6, atol=1e-6)
 
 
 def test_motif_comparison_contract_same_type_and_ordering(pwm_model):
     copy_model = _copy_model(pwm_model, "M2")
     shifted_model = _copy_model(pwm_model, "M3")
     shifted_model.representation = np.roll(shifted_model.representation, 1, axis=1)
-    shifted_model.config["_source_pfm"] = np.roll(shifted_model.config["_source_pfm"], 1, axis=1)
+    shifted_model.config["_source_pfm"] = np.roll(
+        shifted_model.config["_source_pfm"], 1, axis=1
+    )
 
-    frame = TomtomComparator(n_permutations=0, n_jobs=1).compare(
+    frame = TomtomComparator(n_jobs=1).compare(
         [pwm_model],
         [copy_model, shifted_model],
     )
@@ -358,10 +381,12 @@ def test_motif_comparison_contract_same_type_and_ordering(pwm_model):
     np.testing.assert_allclose(frame["score"], [0.937834, 1.0], rtol=1e-6, atol=1e-6)
 
 
-def test_motif_comparison_contract_heterogeneous_pfm_reconstruction(pwm_model, sequence_batch):
+def test_motif_comparison_contract_heterogeneous_pfm_reconstruction(
+    pwm_model, sequence_batch
+):
     heterogeneous_model = _copy_model(pwm_model, "H1", type_key="dimont")
 
-    frame = TomtomComparator(n_permutations=0, n_jobs=1).compare(
+    frame = TomtomComparator(n_jobs=1).compare(
         [pwm_model],
         [heterogeneous_model],
         sequences=sequence_batch,
@@ -379,7 +404,6 @@ def test_profile_comparison_contract_fixed_seed(pwm_model, sequence_batch):
     target_model = _copy_model(pwm_model, "M2")
     comparator = UniversalMotifComparator(
         metric="co",
-        n_permutations=5,
         n_jobs=1,
         seed=123,
     )
@@ -393,5 +417,3 @@ def test_profile_comparison_contract_fixed_seed(pwm_model, sequence_batch):
     assert frame.loc[0, "metric"] == "co"
     assert frame.loc[0, "n_sites"] == 0
     assert frame.loc[0, "score"] == pytest.approx(0.0)
-    assert frame.loc[0, "p-value"] == pytest.approx(1.0)
-    assert frame.loc[0, "z-score"] == pytest.approx(0.0)

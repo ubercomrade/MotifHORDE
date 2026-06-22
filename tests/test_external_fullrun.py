@@ -17,7 +17,9 @@ SMALL_DATA = "tests/test_data/small_pipeline"
 JSTACS_EXAMPLE = "/home/anton/Programs/Jstacs/dimont-example.fa"
 
 
-def _run_cli(tool: str, output_dir, foreground: str, background: str, promoters: str) -> subprocess.CompletedProcess:
+def _run_cli(
+    tool: str, output_dir, foreground: str, background: str, promoters: str
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             "uv",
@@ -33,8 +35,6 @@ def _run_cli(tool: str, output_dir, foreground: str, background: str, promoters:
             "6",
             "-n",
             "1",
-            "--tomtom-perm",
-            "0",
             "--jstacs-threads",
             "1",
             "--dimont-starts",
@@ -53,7 +53,9 @@ def _run_cli(tool: str, output_dir, foreground: str, background: str, promoters:
 @pytest.mark.fullrun
 def test_meme_full_pipeline_smoke(tmp_path):
     if os.environ.get("HORDEMOTIFS_RUN_FULLRUN") != "1":
-        pytest.skip("Set HORDEMOTIFS_RUN_FULLRUN=1 to run external full pipeline smoke tests")
+        pytest.skip(
+            "Set HORDEMOTIFS_RUN_FULLRUN=1 to run external full pipeline smoke tests"
+        )
     command = resolve_command("meme", DEFAULT_MEME_COMMAND, "HORDEMOTIFS_MEME_COMMAND")
     if not (os.path.exists(command) or shutil.which(command)):
         pytest.skip("MEME executable is not available")
@@ -81,12 +83,16 @@ def test_meme_full_pipeline_smoke(tmp_path):
 )
 def test_jstacs_full_pipeline_smoke(tool, jar_path, tmp_path):
     if os.environ.get("HORDEMOTIFS_RUN_FULLRUN") != "1":
-        pytest.skip("Set HORDEMOTIFS_RUN_FULLRUN=1 to run external full pipeline smoke tests")
+        pytest.skip(
+            "Set HORDEMOTIFS_RUN_FULLRUN=1 to run external full pipeline smoke tests"
+        )
     if shutil.which("java") is None or not os.path.exists(jar_path):
         pytest.skip(f"{tool} dependencies are not available")
     if not os.path.exists(JSTACS_EXAMPLE):
         pytest.skip("Jstacs example FASTA is not available")
 
-    result = _run_cli(tool, tmp_path / f"{tool}-out", JSTACS_EXAMPLE, JSTACS_EXAMPLE, JSTACS_EXAMPLE)
+    result = _run_cli(
+        tool, tmp_path / f"{tool}-out", JSTACS_EXAMPLE, JSTACS_EXAMPLE, JSTACS_EXAMPLE
+    )
 
     assert result.returncode == 0, result.stderr

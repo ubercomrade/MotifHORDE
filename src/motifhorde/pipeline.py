@@ -10,14 +10,14 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import joblib
 import pandas as pd
+from mimosa import GenericModel, get_pfm
+from mimosa.batches import SequenceBatch
+from mimosa.functions import format_params
 
-from .batches import SequenceBatch
 from .comparison import TomtomComparator, UniversalMotifComparator
 from .discovery import MotifDiscoveryTool
 from .evaluation import Bootstrapper, PerformanceEvaluator
-from .functions import format_params
 from .io import read_fasta, write_meme
-from .models import GenericModel, get_pfm
 
 SIMILARITY_PVALUE_THRESHOLD = 0.001
 SIMILARITY_SCORE_THRESHOLD = 0.9
@@ -51,12 +51,18 @@ class DeNovoPipeline:
         metric: str,
     ) -> None:
         bootstrap_dir, motifs_dir = self._prepare_output_dirs(output_dir)
-        peaks, background, promoters = self._read_sequences(foreground_path, background_path, promoters_path)
+        peaks, background, promoters = self._read_sequences(
+            foreground_path, background_path, promoters_path
+        )
 
-        statistics, bootstrap_motifs = self._run_bootstrap(peaks, background, discovery_params, output_dir)
+        statistics, bootstrap_motifs = self._run_bootstrap(
+            peaks, background, discovery_params, output_dir
+        )
         self._save_bootstrap(bootstrap_motifs, statistics, bootstrap_dir)
 
-        bootstrap_records = self._compare_bootstrap_motifs(bootstrap_motifs, discovery_params, peaks, statistics, metric)
+        bootstrap_records = self._compare_bootstrap_motifs(
+            bootstrap_motifs, discovery_params, peaks, statistics, metric
+        )
         if bootstrap_records is None:
             print("No motif comparisons were made; exiting.")
             return
@@ -80,7 +86,9 @@ class DeNovoPipeline:
             self.comparator,
             peaks,
         )
-        self._save_results(final_motifs, final_info, final_stats, motifs_dir, metric, promoters)
+        self._save_results(
+            final_motifs, final_info, final_stats, motifs_dir, metric, promoters
+        )
 
     def _prepare_output_dirs(self, output_dir: str) -> Tuple[str, str]:
         os.makedirs(output_dir, exist_ok=True)
@@ -126,14 +134,25 @@ class DeNovoPipeline:
         output_dir: str,
     ):
         bootstrapper = Bootstrapper(self.discovery_tool, self.evaluator, output_dir)
-        return bootstrapper.run(peaks, background, self.number_of_motifs, self.fpr_threshold, discovery_params)
+        return bootstrapper.run(
+            peaks,
+            background,
+            self.number_of_motifs,
+            self.fpr_threshold,
+            discovery_params,
+        )
 
-    def _save_bootstrap(self, motifs: List[GenericModel], statistics: Dict[str, Any], bootstrap_dir: str) -> None:
+    def _save_bootstrap(
+        self, motifs: List[GenericModel], statistics: Dict[str, Any], bootstrap_dir: str
+    ) -> None:
         models_dir = os.path.join(bootstrap_dir, "models")
         os.makedirs(models_dir, exist_ok=True)
         print(f"Saving {len(motifs)} bootstrap motifs to {models_dir}...")
         for index, motif in enumerate(motifs):
-            joblib.dump(motif, os.path.join(models_dir, f"{index:04d}_{_safe_name(motif.name)}.pkl"))
+            joblib.dump(
+                motif,
+                os.path.join(models_dir, f"{index:04d}_{_safe_name(motif.name)}.pkl"),
+            )
         self._save_json(statistics, os.path.join(bootstrap_dir, "statistics.json"))
 
     def _compare_bootstrap_motifs(
@@ -147,16 +166,24 @@ class DeNovoPipeline:
         records = []
 
         for current_params in _iter_param_grid(discovery_params):
-            odd_motifs, even_motifs = _bootstrap_motifs_for_params(bootstrap_motifs, current_params)
+            odd_motifs, even_motifs = _bootstrap_motifs_for_params(
+                bootstrap_motifs, current_params
+            )
             if not odd_motifs or not even_motifs:
                 continue
 
-            odd_selected = _select_nonredundant_motifs(odd_motifs, statistics, metric, self.comparator, peaks)
-            even_selected = _select_nonredundant_motifs(even_motifs, statistics, metric, self.comparator, peaks)
+            odd_selected = _select_nonredundant_motifs(
+                odd_motifs, statistics, metric, self.comparator, peaks
+            )
+            even_selected = _select_nonredundant_motifs(
+                even_motifs, statistics, metric, self.comparator, peaks
+            )
             if not odd_selected or not even_selected:
                 continue
 
-            frame = self.comparator.compare(odd_selected, even_selected, sequences=peaks)
+            frame = self.comparator.compare(
+                odd_selected, even_selected, sequences=peaks
+            )
             frame = _filter_similar_matches(frame)
             if frame.empty:
                 continue
@@ -198,7 +225,9 @@ class DeNovoPipeline:
                 raise ValueError(f"Comparison must contain {metric}")
             group = group.sort_values(metric, ascending=False)
 
-            with tempfile.TemporaryDirectory(dir=os.path.join(output_dir, self.discovery_tool.name)) as tmp_dir:
+            with tempfile.TemporaryDirectory(
+                dir=os.path.join(output_dir, self.discovery_tool.name)
+            ) as tmp_dir:
                 full_motifs = self.discovery_tool.discover(
                     foreground_path,
                     background_path,
@@ -209,7 +238,9 @@ class DeNovoPipeline:
 
                 assigned = set()
                 for _, record in group.iterrows():
-                    remaining = [motif for motif in full_motifs if motif.name not in assigned]
+                    remaining = [
+                        motif for motif in full_motifs if motif.name not in assigned
+                    ]
                     if not remaining:
                         break
 
@@ -221,16 +252,21 @@ class DeNovoPipeline:
                         peaks,
                     )
                     if best is None:
-                        print(f"Params {current_params}: No match found for motifs {record['query']}, {record['target']}")
+                        print(
+                            f"Params {current_params}: No match found for motifs {record['query']}, {record['target']}"
+                        )
                         continue
 
-                    print(f"Params {current_params}: Best match for {record['query']} and {record['target']} is {best.name}")
+                    print(
+                        f"Params {current_params}: Best match for {record['query']} and {record['target']} is {best.name}"
+                    )
                     assigned.add(best.name)
                     _ensure_pfm(best, promoters)
                     final_motifs.append(best)
                     final_info.append((best.name, current_params))
                     final_stats[f"{best.name}_{param_suffix}"] = {
-                        name: record[name] for name in ["auPRC", "auROC", "pauPRC", "pauROC"]
+                        name: record[name]
+                        for name in ["auPRC", "auROC", "pauPRC", "pauROC"]
                     }
 
         return final_motifs, final_info, final_stats
@@ -249,16 +285,24 @@ class DeNovoPipeline:
             return None
 
         sequences = None if isinstance(self.comparator, TomtomComparator) else peaks
-        comparison_odd = self.comparator.compare(full_motifs, odd_ref, sequences=sequences)
-        comparison_even = self.comparator.compare(full_motifs, even_ref, sequences=sequences)
+        comparison_odd = self.comparator.compare(
+            full_motifs, odd_ref, sequences=sequences
+        )
+        comparison_even = self.comparator.compare(
+            full_motifs, even_ref, sequences=sequences
+        )
 
         compare_metric = _comparison_column(comparison_odd)
         _comparison_column(comparison_even)
 
         candidates = []
         for motif in full_motifs:
-            odd_values = comparison_odd.loc[comparison_odd["query"] == motif.name, compare_metric].values
-            even_values = comparison_even.loc[comparison_even["query"] == motif.name, compare_metric].values
+            odd_values = comparison_odd.loc[
+                comparison_odd["query"] == motif.name, compare_metric
+            ].values
+            even_values = comparison_even.loc[
+                comparison_even["query"] == motif.name, compare_metric
+            ].values
             if not len(odd_values) or not len(even_values):
                 continue
             odd_value = float(odd_values[0])
@@ -271,7 +315,11 @@ class DeNovoPipeline:
 
         if not candidates:
             return None
-        return sorted(candidates, key=lambda item: item[1], reverse=not _comparison_sort_ascending(compare_metric))[0][0]
+        return sorted(
+            candidates,
+            key=lambda item: item[1],
+            reverse=not _comparison_sort_ascending(compare_metric),
+        )[0][0]
 
     def _save_results(
         self,
@@ -287,7 +335,9 @@ class DeNovoPipeline:
 
         sorted_indices = sorted(
             range(len(final_info)),
-            key=lambda index: final_stats[stats_key(final_info[index][0], final_info[index][1])][metric],
+            key=lambda index: final_stats[
+                stats_key(final_info[index][0], final_info[index][1])
+            ][metric],
             reverse=True,
         )
         motifs_sorted = [final_motifs[index] for index in sorted_indices]
@@ -299,17 +349,26 @@ class DeNovoPipeline:
 
         pfms = [_ensure_pfm(motif, promoters) for motif in motifs_sorted]
         metadata = [(motif.name, motif.length) for motif in motifs_sorted]
-        write_meme(pfms, metadata, os.path.join(models_dir, "all_motifs_in_pfm_form.meme"))
+        write_meme(
+            pfms, metadata, os.path.join(models_dir, "all_motifs_in_pfm_form.meme")
+        )
 
         for rank, motif in enumerate(motifs_sorted, start=1):
-            joblib.dump(motif, os.path.join(models_dir, f"{rank:03d}_{_safe_name(motif.name)}.pkl"))
+            joblib.dump(
+                motif,
+                os.path.join(models_dir, f"{rank:03d}_{_safe_name(motif.name)}.pkl"),
+            )
 
         self._save_json(final_stats, os.path.join(motifs_dir, "statistics.json"))
 
         for index, (name, params) in enumerate(info_sorted, start=1):
             stats = final_stats[stats_key(name, params)]
             params_str = ", ".join(f"{key}={params[key]}" for key in sorted(params))
-            parts = [f"{key}={stats[key]:.4f}" for key in ["auPRC", "auROC", "pauPRC", "pauROC"] if key in stats]
+            parts = [
+                f"{key}={stats[key]:.4f}"
+                for key in ["auPRC", "auROC", "pauPRC", "pauROC"]
+                if key in stats
+            ]
             print(f"Motif {index}: {name}; {params_str}; " + "; ".join(parts))
 
     @staticmethod
@@ -332,7 +391,9 @@ def _safe_name(name: str) -> str:
     return name.replace("/", "_").replace("\\", "_").replace(":", "-")
 
 
-def _iter_param_grid(discovery_params: Dict[str, Iterable[Any]]) -> Iterable[Dict[str, Any]]:
+def _iter_param_grid(
+    discovery_params: Dict[str, Iterable[Any]],
+) -> Iterable[Dict[str, Any]]:
     param_keys = sorted(discovery_params)
     param_values = [discovery_params[key] for key in param_keys]
     for combination in itertools.product(*param_values):
@@ -346,8 +407,12 @@ def _bootstrap_motifs_for_params(
     param_suffix = format_params(current_params)
     odd_suffix = f"_{param_suffix}_odd"
     even_suffix = f"_{param_suffix}_even"
-    odd_motifs = [motif for motif in bootstrap_motifs if motif.name.endswith(odd_suffix)]
-    even_motifs = [motif for motif in bootstrap_motifs if motif.name.endswith(even_suffix)]
+    odd_motifs = [
+        motif for motif in bootstrap_motifs if motif.name.endswith(odd_suffix)
+    ]
+    even_motifs = [
+        motif for motif in bootstrap_motifs if motif.name.endswith(even_suffix)
+    ]
     return odd_motifs, even_motifs
 
 
@@ -385,11 +450,17 @@ def _filter_similar_matches(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _sort_comparisons(frame: pd.DataFrame) -> pd.DataFrame:
     column = _comparison_column(frame)
-    return frame.sort_values(by=column, ascending=_comparison_sort_ascending(column)).reset_index(drop=True)
+    return frame.sort_values(
+        by=column, ascending=_comparison_sort_ascending(column)
+    ).reset_index(drop=True)
 
 
 def _deduplicate_matches(frame: pd.DataFrame) -> pd.DataFrame:
-    return frame.drop_duplicates(subset=["query"]).drop_duplicates(subset=["target"]).reset_index(drop=True)
+    return (
+        frame.drop_duplicates(subset=["query"])
+        .drop_duplicates(subset=["target"])
+        .reset_index(drop=True)
+    )
 
 
 def _select_nonredundant_motifs(
@@ -417,11 +488,16 @@ def _select_nonredundant_motifs(
     return selected
 
 
-def _attach_average_metrics(frame: pd.DataFrame, statistics: Dict[str, Any]) -> pd.DataFrame:
+def _attach_average_metrics(
+    frame: pd.DataFrame, statistics: Dict[str, Any]
+) -> pd.DataFrame:
     frame = frame.copy()
     for metric in VALIDATION_METRICS:
         frame[metric] = [
-            (statistics.get(row["query"], {}).get(metric, 0.0) + statistics.get(row["target"], {}).get(metric, 0.0))
+            (
+                statistics.get(row["query"], {}).get(metric, 0.0)
+                + statistics.get(row["target"], {}).get(metric, 0.0)
+            )
             / 2.0
             for _, row in frame.iterrows()
         ]
@@ -435,13 +511,17 @@ def _deduplicate_final_motifs(
     metric: str,
     comparator,
     sequences,
-) -> Tuple[List[GenericModel], List[Tuple[str, Dict[str, Any]]], Dict[str, Dict[str, float]]]:
+) -> Tuple[
+    List[GenericModel], List[Tuple[str, Dict[str, Any]]], Dict[str, Dict[str, float]]
+]:
     def stats_key(name: str, params: Dict[str, Any]) -> str:
         return f"{name}_{format_params(params)}"
 
     sorted_indices = sorted(
         range(len(final_motifs)),
-        key=lambda index: final_stats[stats_key(final_info[index][0], final_info[index][1])][metric],
+        key=lambda index: final_stats[
+            stats_key(final_info[index][0], final_info[index][1])
+        ][metric],
         reverse=True,
     )
 
@@ -463,6 +543,7 @@ def _deduplicate_final_motifs(
     deduplicated_motifs = [final_motifs[index] for index in kept_indices]
     deduplicated_info = [final_info[index] for index in kept_indices]
     deduplicated_stats = {
-        stats_key(name, params): final_stats[stats_key(name, params)] for name, params in deduplicated_info
+        stats_key(name, params): final_stats[stats_key(name, params)]
+        for name, params in deduplicated_info
     }
     return deduplicated_motifs, deduplicated_info, deduplicated_stats

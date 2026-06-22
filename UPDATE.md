@@ -79,9 +79,17 @@ motifhorde -> mimosa
 - [x] 2026-06-22: `src/motifhorde/models.py` converted into a thin
   compatibility facade over `mimosa`, with legacy wrappers only for
   motifhorde-specific defaults and PWM/MEME reader compatibility.
-- [ ] Phase 5 and later remain pending. Internal consumers still use the
-  compatibility boundary, and local duplicate `batches.py`, `functions.py`,
-  `comparison.py`, and compatibility I/O code have not been removed.
+- [x] 2026-06-22: Legacy `motifhorde.models` wrappers were removed. The module
+  now re-exports MIMOSA runtime functions directly.
+- [x] 2026-06-22: Internal consumers now use `mimosa` for model runtime,
+  batches, scoring helpers, cache helpers, and comparison algorithms.
+- [x] 2026-06-22: Local duplicate `batches.py`, `functions.py`, and
+  `validation.py` were deleted; `comparison.py` was reduced to pipeline-facing
+  wrappers over `mimosa.comparison`.
+- [x] 2026-06-22: Generic model readers/writers were removed from
+  `motifhorde.io`; model parsing and serialization now belong to MIMOSA.
+- [ ] Phase 6/8 remain pending. Saved-model compatibility policy and release
+  boundary documentation still need final review before a release.
 
 ## Phase 0 - Baseline Audit
 
@@ -151,16 +159,16 @@ Status:
 | Area | Current `motifhorde` behavior | Migration requirement |
 | :--- | :--- | :--- |
 | Public API | `motifhorde.__init__` exports `GenericModel`, `get_pfm`, `get_sites`, `read_model`, `scan_model`, and `write_model`. README examples import the fuller `motifhorde.models` API, including `scan_model_strands` and `calculate_threshold_table`. | Preserve these imports through `motifhorde.models` until public docs are intentionally changed. |
-| Model container | `GenericModel` is a `motifhorde.models` dataclass with `type_key`, `name`, `representation`, `length`, and `config`. Existing joblib pickles use the `motifhorde.models.GenericModel` class path. | Either load old pickles through a compatibility path or reject them with a clear migration error. |
-| Model readers | `pwm` accepts `.meme`, `.txt`, `.pfm`, and compatible `.pkl`; `bamm` accepts `.ihbcp` and resolves a missing suffix; `sitega` accepts `.mat` and `.pkl`; `dimont` and `slim` accept `.xml` and `.pkl`; `scores` accepts FASTA-like numeric profiles. | `mimosa` readers or wrapper code must preserve these accepted inputs before local readers are removed. |
-| Dense payloads | Sequences, masked scores, and strand profiles are `TypedDict` payloads with dense arrays, row lengths, masks where needed, and padding values. | Internal consumers must keep receiving the same shapes until they are migrated together. |
+| Model container | `GenericModel` is now `mimosa.GenericModel` re-exported by `motifhorde.models`. | Do not add a local model container back. Old class-path pickle support is not maintained by a local shim. |
+| Model readers | Model reading is delegated to MIMOSA. PWM `.txt` and compact legacy MEME handling are no longer supported locally. | Fix unsupported generic model formats in MIMOSA rather than adding motifhorde fallback readers. |
+| Dense payloads | Sequences, masked scores, and strand profiles use MIMOSA `TypedDict` payloads with dense arrays, row lengths, masks where needed, and padding values. | Keep internal consumers on MIMOSA payload helpers. |
 | Strand semantics | `scan_model(..., strand="+")` scans the forward strand; `"-"` scans reverse complement; `"best"` returns the elementwise maximum of plus/minus scores. `scan_model_strands` returns a two-strand bundle with shape `(2, n_rows, width)`. | Preserve score values, row lengths, and plus/minus ordering exactly. |
-| Threshold table | `calculate_threshold_table` uses valid scores only and returns descending `[score, -log10(tail_probability)]` rows. Empty calibration produces `[[0.0, 0.0]]`. | Preserve lookup semantics and empty input behavior. |
+| Threshold table | `calculate_threshold_table` is delegated to MIMOSA. The default calibration strand is MIMOSA's `"both"`, not the old motifhorde `"best"`. | Use explicit `strand="best"` only where the pipeline requires old evaluation semantics. |
 | Site table | `get_sites` returns columns `seq_index`, `start`, `end`, `strand`, `score`, `log_tail`, and `site`. Threshold mode requires `fpr_threshold`; best mode returns one hit per sequence when available. | Preserve column names, ordering, strand labels, and threshold validation. |
 | PFM reconstruction | `get_pfm` reconstructs a normalized `4 x length` PFM from selected sites with default pseudocount `0.25`. `top_fraction` keeps at least one site. Empty selections raise `ValueError("No sites found")`. | Preserve normalization, pseudocount behavior, and error behavior. |
 | Comparison | `TomtomComparator` and `UniversalMotifComparator` are pipeline-facing wrappers. Heterogeneous motif comparison falls back to PFM reconstruction when `type_key` differs. One-to-many comparison preserves target order. | Delegate only after result parity is covered by contract tests. |
-| Direct internal dependencies | `evaluation.py`, `discovery.py`, `pipeline.py`, `comparison.py`, `cache.py`, `io.py`, tests, and `__init__.py` directly import or depend on `motifhorde.models`. | Migrate consumers through one compatibility boundary rather than mixing local and `mimosa` runtimes. |
-| Current `mimosa` state | `mimosa-tool 1.3.0` is installed and provides `GenericModel`, dense batches, scanning, both-strand profiles, sites/PFM reconstruction, threshold calibration, readers/writers, and comparison API. | Keep the `motifhorde.models` facade until legacy `.txt`/compact MEME parsing, old defaults, and pickle compatibility are intentionally retired or fully upstreamed. |
+| Direct internal dependencies | `evaluation.py`, `discovery.py`, `pipeline.py`, `comparison.py`, `cache.py`, and `io.py` now use direct MIMOSA APIs for generic runtime behavior. | Keep motifhorde code focused on orchestration, discovery tool execution, output layout, and selection policy. |
+| Current `mimosa` state | `mimosa-tool 1.3.0` is installed and provides `GenericModel`, dense batches, scanning, both-strand profiles, sites/PFM reconstruction, threshold calibration, readers/writers, cache helpers, and comparison API. | Treat MIMOSA as the source of truth. Do not reintroduce local compatibility fallbacks for generic runtime behavior. |
 
 ## Phase 1 - Contract Tests Before Integration
 
@@ -222,9 +230,8 @@ Status:
   same-type comparison, heterogeneous PFM-based comparison, fixed-seed profile
   comparison, and one-to-many target ordering.
 - [x] The suite now also covers the installed `mimosa` import/API smoke test,
-  `motifhorde.models.GenericModel` aliasing to `mimosa.GenericModel`, legacy
-  PWM `.txt` input, and old `motifhorde.models.GenericModel` pickle loading
-  through the compatibility facade.
+  `motifhorde.models.GenericModel` aliasing to `mimosa.GenericModel`, direct
+  MIMOSA reader behavior, and rejection of legacy PWM `.txt` inputs.
 - [ ] Real XML fixtures for `dimont` and `slim` are still needed before local
   XML readers can be safely deleted. The current baseline covers their
   supported `.pkl` loading path and shared scanner behavior.
@@ -369,15 +376,12 @@ Status:
   `GenericModel`, model registry, reading/writing, scanning, both-strand
   profiles, score/frequency helpers, threshold calibration, sites, and PFM
   reconstruction.
-- [x] Legacy wrappers are limited to compatibility behavior:
-  `calculate_threshold_table` keeps the old `strand="best"` default,
-  `get_sites`/`get_pfm` preserve old calibration and hit-selection defaults,
-  and PWM `.meme`/`.txt` loading keeps motifhorde's permissive MEME parser.
-- [x] Migration tests cover `GenericModel` aliasing, old
-  `motifhorde.models.GenericModel` pickle loading, legacy `.txt` PWM loading,
-  and contract behavior after routing through `mimosa`.
-- [ ] Internal consumers still need a Phase 5 audit before any remaining local
-  duplicate generic code is deleted.
+- [x] Legacy wrappers were removed after the integration direction changed to
+  prefer direct MIMOSA behavior over old local compatibility.
+- [x] Migration tests cover `GenericModel` aliasing, direct MIMOSA reader
+  behavior, MIMOSA two-strand threshold defaults, and comparison behavior after
+  routing through `mimosa`.
+- [x] Internal consumers were audited and migrated in Phase 5.
 
 ## Phase 5 - Migrate Internal Consumers
 
@@ -423,6 +427,25 @@ Acceptance criteria:
   fixtures exist.
 - Full-run external smoke tests pass when enabled.
 - Comparison results stay within documented numerical tolerances.
+
+Status:
+
+- [x] `evaluation.py` uses MIMOSA scanning and threshold calibration directly;
+  evaluation-specific metric logic remains local.
+- [x] `discovery.py` reads produced models with `mimosa.read_model`; external
+  tool execution stays in `motifhorde`.
+- [x] `pipeline.py` uses MIMOSA `GenericModel`, `get_pfm`, batch types, and
+  parameter formatting while keeping selection/output policy local.
+- [x] `cache.py` re-exports MIMOSA cache helpers instead of maintaining a local
+  fingerprint/cache fork.
+- [x] `comparison.py` delegates to `mimosa.comparison`; only
+  `TomtomComparator` and `UniversalMotifComparator` remain as pipeline-facing
+  wrappers.
+- [x] Old local Monte Carlo/surrogate comparison options were removed from CLI,
+  README examples, and tests because MIMOSA 1.3.0 uses distribution-backed null
+  support instead.
+- [x] Full unit suite passes locally; external full-run tests remain gated by
+  `HORDEMOTIFS_RUN_FULLRUN=1`.
 
 ## Phase 6 - Pickle And File Compatibility Migration
 
@@ -501,10 +524,21 @@ Status:
 
 - [x] Duplicate model registry, scan dispatch, site/PFM reconstruction, and
   threshold-calibration code was removed from `src/motifhorde/models.py`.
-- [ ] Duplicate generic helpers still remain in `src/motifhorde/batches.py`,
-  `src/motifhorde/functions.py`, `src/motifhorde/comparison.py`, and the
-  compatibility MEME reader path. Do not delete them until Phase 5/6 parity
-  and external fixture coverage are complete.
+- [x] Duplicate generic batch helpers were removed with
+  `src/motifhorde/batches.py`; internal code imports `mimosa.batches`.
+- [x] Duplicate generic numerical/scoring helpers were removed with
+  `src/motifhorde/functions.py`; internal code imports `mimosa.functions`.
+- [x] Duplicate comparison kernels were removed from
+  `src/motifhorde/comparison.py`; the module now delegates to
+  `mimosa.comparison`.
+- [x] Obsolete local validation helpers for the removed comparison config were
+  deleted with `src/motifhorde/validation.py`.
+- [x] README and tests were updated to remove old local Monte Carlo comparison
+  options and legacy PWM `.txt` compatibility.
+- [x] Generic model readers for MEME/BaMM/SiteGA/Jstacs/scores and old PFM/DIST
+  writer helpers were removed from `src/motifhorde/io.py`.
+- [ ] Full-run external smoke tests still need to be run with external tools
+  enabled before release.
 
 ## Phase 8 - Stabilize Release Boundary
 
