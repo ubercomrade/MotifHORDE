@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import re
 import shutil
 from abc import ABC, abstractmethod
 from typing import List
@@ -25,6 +26,8 @@ from .external import (
 from .io import write_jstacs_fasta
 
 logger = logging.getLogger(__name__)
+
+_MEME_WIDTH_RE = re.compile(r"\bw=\s*(\d+)")
 
 
 class MotifDiscoveryTool(ABC):
@@ -68,6 +71,70 @@ def _has_expected_length(motif: GenericModel, expected_length: int | None) -> bo
     return False
 
 
+def _meme_matrix_width(header: str) -> int:
+    match = _MEME_WIDTH_RE.search(header)
+    if match is None:
+        return 0
+    return int(match.group(1))
+
+
+def _is_probability_row(line: str) -> bool:
+    parts = line.strip().split()
+    if len(parts) != 4:
+        return False
+    try:
+        for part in parts:
+            float(part)
+    except ValueError:
+        return False
+    return True
+
+
+def _meme_full_report_name(line: str) -> str | None:
+    parts = line.strip().split()
+    if len(parts) < 2 or parts[0] != "MOTIF":
+        return None
+    if len(parts) >= 3 and parts[2].startswith("MEME-"):
+        return parts[2]
+    return parts[1]
+
+
+def _meme_stdout_for_mimosa(stdout: str) -> str:
+    """Convert MEME full text reports to the compact MEME matrix format."""
+    lines = stdout.splitlines()
+    motifs: list[tuple[str, str, list[str]]] = []
+    current_name: str | None = None
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        name = _meme_full_report_name(line)
+        if name is not None:
+            current_name = name
+        elif line.startswith("letter-probability matrix:"):
+            width = _meme_matrix_width(line)
+            rows = lines[index + 1 : index + 1 + width]
+            if (
+                current_name is not None
+                and width > 0
+                and len(rows) == width
+                and all(_is_probability_row(row) for row in rows)
+            ):
+                motifs.append(
+                    (current_name, line.strip(), [row.strip() for row in rows])
+                )
+                index += width
+        index += 1
+
+    if not motifs:
+        return stdout
+
+    normalized = ["MEME version 4", "", "ALPHABET= ACGT", "", "strands: + -", ""]
+    for name, header, rows in motifs:
+        normalized.extend([f"MOTIF {name}", header, *rows, ""])
+    return "\n".join(normalized)
+
+
 def _read_indexed_models(
     path: str,
     model_type: str,
@@ -83,10 +150,6 @@ def _read_indexed_models(
         try:
             motif = read_model(path, model_type, index=index)
         except IndexError:
-            break
-        except ValueError:
-            if index == 0:
-                return []
             break
         motif.name = f"{prefix}-{index + 1}"
         if _has_expected_length(motif, expected_length):
@@ -259,7 +322,7 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
         result = run_checked(meme_args)
         if result.stdout:
             with open(tmp_meme, "w") as handle:
-                handle.write(result.stdout)
+                handle.write(_meme_stdout_for_mimosa(result.stdout))
         elif os.path.exists(os.path.join(output_dir, "meme.txt")):
             tmp_meme = os.path.join(output_dir, "meme.txt")
         return _read_indexed_models(

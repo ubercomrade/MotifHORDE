@@ -12,6 +12,7 @@ from motifhorde.external import (
     DEFAULT_SLIM_JAR,
     resolve_command,
 )
+from motifhorde.models import read_model
 
 SMALL_DATA = "tests/test_data/small_pipeline"
 JSTACS_EXAMPLE = "/home/anton/Programs/Jstacs/dimont-example.fa"
@@ -60,15 +61,27 @@ def test_meme_full_pipeline_smoke(tmp_path):
     if not (os.path.exists(command) or shutil.which(command)):
         pytest.skip("MEME executable is not available")
 
+    output_dir = tmp_path / "meme-out"
     result = _run_cli(
         "meme",
-        tmp_path / "meme-out",
+        output_dir,
         f"{SMALL_DATA}/foreground.fa",
         f"{SMALL_DATA}/background.fa",
         f"{SMALL_DATA}/promoters.fa",
     )
 
     assert result.returncode == 0, result.stderr
+    models_dir = output_dir / "meme" / "motifs" / "models"
+    model_paths = sorted(models_dir.glob("*.pkl"))
+    assert model_paths
+    assert (models_dir / "all_motifs_in_pfm_form.meme").exists()
+
+    pkl_model = read_model(os.fspath(model_paths[0]), "pwm")
+    meme_model = read_model(
+        os.fspath(models_dir / "all_motifs_in_pfm_form.meme"), "pwm"
+    )
+    assert pkl_model.type_key == "pwm"
+    assert meme_model.type_key == "pwm"
 
 
 @pytest.mark.external

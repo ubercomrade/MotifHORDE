@@ -4,10 +4,26 @@ import os
 import subprocess
 
 import numpy as np
+import pytest
 
 from motifhorde.discovery import MemeDiscoveryTool, StremeDiscoveryTool
 from motifhorde.io import write_meme
 from motifhorde.models import GenericModel
+
+FULL_MEME_REPORT = """\
+********************************************************************************
+MOTIF ACGT MEME-1\twidth =   4  sites =  2  llr = 42  E-value = 1.0e-004
+********************************************************************************
+--------------------------------------------------------------------------------
+\tMotif ACGT MEME-1 position-specific probability matrix
+--------------------------------------------------------------------------------
+letter-probability matrix: alength= 4 w= 4 nsites= 2 E= 1.0e-004
+ 1.000000  0.000000  0.000000  0.000000
+ 0.000000  1.000000  0.000000  0.000000
+ 0.000000  0.000000  1.000000  0.000000
+ 0.000000  0.000000  0.000000  1.000000
+--------------------------------------------------------------------------------
+"""
 
 
 def _write_motifs_meme(path, lengths):
@@ -23,7 +39,9 @@ def test_meme_discovery_reads_generic_models(monkeypatch, tmp_path):
         calls.append(args)
         meme_path = tmp_path / "source.meme"
         _write_motifs_meme(meme_path, [4, 4])
-        return subprocess.CompletedProcess(args, 0, stdout=meme_path.read_text(), stderr="")
+        return subprocess.CompletedProcess(
+            args, 0, stdout=meme_path.read_text(), stderr=""
+        )
 
     monkeypatch.setattr("motifhorde.discovery.run_checked", fake_run_checked)
 
@@ -41,15 +59,47 @@ def test_meme_discovery_reads_generic_models(monkeypatch, tmp_path):
     assert "-p" in calls[0]
 
 
+def test_meme_discovery_reads_full_meme_report(monkeypatch, tmp_path):
+    def fake_run_checked(args, cwd=None):
+        return subprocess.CompletedProcess(args, 0, stdout=FULL_MEME_REPORT, stderr="")
+
+    monkeypatch.setattr("motifhorde.discovery.run_checked", fake_run_checked)
+
+    motifs = MemeDiscoveryTool(command="meme-bin").discover(
+        "fg.fa", "bg.fa", os.fspath(tmp_path / "out"), 1, length=4
+    )
+
+    assert [motif.name for motif in motifs] == ["Meme-1"]
+    assert motifs[0].length == 4
+    expected = np.eye(4, dtype=np.float32)
+    np.testing.assert_allclose(motifs[0].config["_source_pfm"], expected)
+
+
 def test_meme_discovery_missing_output_returns_empty(monkeypatch, tmp_path):
     def fake_run_checked(args, cwd=None):
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr("motifhorde.discovery.run_checked", fake_run_checked)
 
-    motifs = MemeDiscoveryTool(command="meme-bin").discover("fg.fa", "bg.fa", os.fspath(tmp_path), 2, length=4)
+    motifs = MemeDiscoveryTool(command="meme-bin").discover(
+        "fg.fa", "bg.fa", os.fspath(tmp_path), 2, length=4
+    )
 
     assert motifs == []
+
+
+def test_meme_discovery_rejects_malformed_non_empty_output(monkeypatch, tmp_path):
+    def fake_run_checked(args, cwd=None):
+        return subprocess.CompletedProcess(
+            args, 0, stdout="not a meme report", stderr=""
+        )
+
+    monkeypatch.setattr("motifhorde.discovery.run_checked", fake_run_checked)
+
+    with pytest.raises(ValueError, match="No motifs found"):
+        MemeDiscoveryTool(command="meme-bin").discover(
+            "fg.fa", "bg.fa", os.fspath(tmp_path), 2, length=4
+        )
 
 
 def test_streme_discovery_sets_strict_width_bounds(monkeypatch, tmp_path):
@@ -59,7 +109,9 @@ def test_streme_discovery_sets_strict_width_bounds(monkeypatch, tmp_path):
         calls.append(args)
         meme_path = tmp_path / "source.meme"
         _write_motifs_meme(meme_path, [4])
-        return subprocess.CompletedProcess(args, 0, stdout=meme_path.read_text(), stderr="")
+        return subprocess.CompletedProcess(
+            args, 0, stdout=meme_path.read_text(), stderr=""
+        )
 
     monkeypatch.setattr("motifhorde.discovery.run_checked", fake_run_checked)
 
@@ -81,7 +133,9 @@ def test_discovery_filters_motifs_with_unexpected_length(monkeypatch, tmp_path):
     def fake_run_checked(args, cwd=None):
         meme_path = tmp_path / "source.meme"
         _write_motifs_meme(meme_path, [4, 5])
-        return subprocess.CompletedProcess(args, 0, stdout=meme_path.read_text(), stderr="")
+        return subprocess.CompletedProcess(
+            args, 0, stdout=meme_path.read_text(), stderr=""
+        )
 
     monkeypatch.setattr("motifhorde.discovery.run_checked", fake_run_checked)
 
