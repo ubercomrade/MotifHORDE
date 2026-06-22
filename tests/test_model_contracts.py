@@ -18,6 +18,7 @@ from motifhorde.models import (
     scan_model_strands,
     write_model,
 )
+from motifhorde.pipeline import DeNovoPipeline
 
 
 EXPECTED_PLUS_SCORES = np.array(
@@ -358,6 +359,59 @@ def test_pickle_and_pwm_write_contract(tmp_path, pwm_model, test_pfm):
     assert loaded_pfm.length == pwm_model.length
     np.testing.assert_allclose(
         loaded_pfm.config["_source_pfm"], test_pfm, rtol=1e-6, atol=1e-6
+    )
+
+
+def test_read_model_rejects_unsupported_pickle_payload(tmp_path):
+    pickle_path = tmp_path / "unsupported.pkl"
+    joblib.dump({"type_key": "pwm"}, pickle_path)
+
+    with pytest.raises(TypeError, match="Unsupported PWM pickle payload"):
+        read_model(os.fspath(pickle_path), "pwm")
+
+
+def test_pipeline_saved_models_are_mimosa_readable(
+    tmp_path, pwm_model, sequence_batch, test_pfm
+):
+    pipeline = DeNovoPipeline(
+        discovery_tool=None,
+        evaluator=None,
+        comparator=TomtomComparator(n_jobs=1),
+    )
+    final_info = [(pwm_model.name, {"length": pwm_model.length})]
+    final_stats = {
+        f"{pwm_model.name}_length-{pwm_model.length}": {
+            "auPRC": 0.7,
+            "auROC": 0.8,
+            "pauPRC": 0.6,
+            "pauROC": 0.9,
+        }
+    }
+
+    pipeline._save_results(
+        [pwm_model],
+        final_info,
+        final_stats,
+        os.fspath(tmp_path),
+        "pauROC",
+        sequence_batch,
+    )
+
+    model_path = tmp_path / "models" / f"001_{pwm_model.name}.pkl"
+    loaded_model = read_model(os.fspath(model_path), "pwm")
+    assert isinstance(loaded_model, GenericModel)
+    assert loaded_model.type_key == "pwm"
+    assert loaded_model.name == pwm_model.name
+    np.testing.assert_allclose(
+        loaded_model.config["_source_pfm"], test_pfm, rtol=1e-6, atol=1e-6
+    )
+
+    meme_path = tmp_path / "models" / "all_motifs_in_pfm_form.meme"
+    loaded_meme = read_model(os.fspath(meme_path), "pwm")
+    assert loaded_meme.type_key == "pwm"
+    assert loaded_meme.name == pwm_model.name
+    np.testing.assert_allclose(
+        loaded_meme.config["_source_pfm"], test_pfm, rtol=1e-6, atol=1e-6
     )
 
 

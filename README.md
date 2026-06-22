@@ -93,10 +93,10 @@ are fixed inside the pipeline rather than exposed as separate selection flags.
 
 ## Supported Models
 
-MotifHORDE uses a functional runtime API inspired by `mimosa`.
+MotifHORDE uses `mimosa-tool` as the canonical model runtime.
 
-- `GenericModel` stores `type_key`, `name`, `representation`, `length`, and
-  `config`.
+- `mimosa.GenericModel` stores `type_key`, `name`, `representation`, `length`,
+  and `config`.
 - Model operations are functions: `read_model`, `write_model`, `scan_model`,
   `scan_model_strands`, `get_pfm`, `get_sites`, and
   `calculate_threshold_table`.
@@ -109,12 +109,17 @@ Supported model readers and scanners:
 
 | Type key | Main file formats | Notes |
 | :--- | :--- | :--- |
-| `pwm` | `.meme`, `.txt`, `.pfm`, `.pkl` | MEME/PFM matrices are converted to PWM log-odds. |
+| `pwm` | `.meme`, `.pfm`, `.pkl` | MEME/PFM matrices are converted to PWM log-odds. |
 | `bamm` | `.ihbcp` | Read as a dense Markov tensor with uniform-background log-odds. |
 | `sitega` | `.mat`, `.pkl` | Locally positioned dinucleotide model. |
 | `dimont` | `.xml`, `.pkl` | Jstacs Dimont XML is converted to a dense scoring tensor. |
 | `slim` | `.xml`, `.pkl` | Jstacs SlimDimont XML is converted to a dense scoring tensor. |
 | `scores` | FASTA-like numeric profiles | Used for precomputed score/profile workflows. |
+
+Model parsing, serialization, scanning, threshold calibration, site extraction,
+PFM reconstruction, and comparison kernels are delegated to MIMOSA. Legacy PWM
+`.txt` inputs and old local fallback parsers are not supported by MotifHORDE; if
+a generic format needs support, it should be added to MIMOSA.
 
 Legacy motif classes and ragged payloads are not used in production code.
 
@@ -315,9 +320,30 @@ output/
 
 `bootstrap/statistics.json` stores metrics for odd/even validation motifs.
 `motifs/statistics.json` stores metrics associated with selected final motifs.
-Final models are saved as pickled `GenericModel` objects. A MEME-format file
-with all selected final motifs in PFM form is also written for compatibility
-with downstream PWM-oriented tools.
+Final models are saved as joblib-pickled `mimosa.GenericModel` objects for the
+currently supported MIMOSA runtime. A MEME-format file with all selected final
+motifs in PFM form is also written for compatibility with downstream
+PWM-oriented tools.
+
+## Saved Model Compatibility
+
+Pickled `*.pkl` models are trusted runtime artifacts for
+`mimosa-tool>=1.3.0,<2`. They are not the stable long-term interchange format.
+Use `all_motifs_in_pfm_form.meme` or explicit `.pfm` exports when models must
+survive runtime changes.
+
+Pre-MIMOSA `motifhorde.models.GenericModel` pickles are not maintained through a
+local migration loader. If an old pickle is not accepted by MIMOSA, regenerate
+the model from the original discovery output, MEME/PFM export, or by rerunning
+discovery. Unsupported pickle payloads are rejected by MIMOSA validation instead
+of being silently coerced.
+
+## Dependency Boundary
+
+MotifHORDE supports `mimosa-tool>=1.3.0,<2` and treats MIMOSA as the source of
+truth for generic model runtime behavior. Runtime fixes should be released in
+MIMOSA first, then MotifHORDE should bump the supported dependency range and run
+the contract, pipeline, and external smoke tests before release.
 
 ## Python API
 

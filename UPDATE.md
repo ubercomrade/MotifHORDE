@@ -10,10 +10,10 @@ The migration must be gradual. The project should keep working after each
 phase, and every behavior change must be covered by tests before duplicated
 local code is removed.
 
-## Current State
+## Baseline State
 
-`motifhorde` currently contains local model-runtime code that overlaps with
-`mimosa`:
+At the start of this migration, `motifhorde` contained local model-runtime code
+that overlapped with `mimosa`:
 
 - `src/motifhorde/models.py` defines `GenericModel`, model registry dispatch,
   model readers and writers, scanning, site extraction, PFM reconstruction, and
@@ -27,8 +27,8 @@ local code is removed.
 - `src/motifhorde/discovery.py`, `src/motifhorde/evaluation.py`, and
   `src/motifhorde/pipeline.py` depend on the local model API.
 
-This makes the project self-contained, but it creates a long-term maintenance
-problem: fixes and behavior changes in `mimosa` and `motifhorde` can diverge.
+This made the project self-contained, but it created a long-term maintenance
+problem: fixes and behavior changes in `mimosa` and `motifhorde` could diverge.
 
 ## Target Architecture
 
@@ -88,8 +88,15 @@ motifhorde -> mimosa
   wrappers over `mimosa.comparison`.
 - [x] 2026-06-22: Generic model readers/writers were removed from
   `motifhorde.io`; model parsing and serialization now belong to MIMOSA.
-- [ ] Phase 6/8 remain pending. Saved-model compatibility policy and release
-  boundary documentation still need final review before a release.
+- [x] 2026-06-22: Saved-model compatibility policy was finalized: `.pkl` files
+  are MIMOSA/joblib runtime artifacts, while MEME/PFM remains the stable
+  downstream exchange path.
+- [x] 2026-06-22: Release boundary documentation was added for the supported
+  `mimosa-tool>=1.3.0,<2` range and future runtime dependency bumps.
+- [x] 2026-06-22: External full-run smoke tests were executed with
+  `HORDEMOTIFS_RUN_FULLRUN=1`: Jstacs Dimont/Slim smokes passed.
+- [ ] MEME full-run smoke remains a release gate in this environment because
+  the `meme` executable is not available.
 
 ## Phase 0 - Baseline Audit
 
@@ -231,10 +238,12 @@ Status:
   comparison, and one-to-many target ordering.
 - [x] The suite now also covers the installed `mimosa` import/API smoke test,
   `motifhorde.models.GenericModel` aliasing to `mimosa.GenericModel`, direct
-  MIMOSA reader behavior, and rejection of legacy PWM `.txt` inputs.
-- [ ] Real XML fixtures for `dimont` and `slim` are still needed before local
-  XML readers can be safely deleted. The current baseline covers their
-  supported `.pkl` loading path and shared scanner behavior.
+  MIMOSA reader behavior, rejection of legacy PWM `.txt` inputs, unsupported
+  pickle-payload rejection, and pipeline saved-model rereading.
+- [ ] Real XML fixtures for `dimont` and `slim` are still useful as explicit
+  MIMOSA reader contract coverage. The current unit baseline covers their
+  supported `.pkl` loading path and shared scanner behavior; external full-run
+  smokes cover XML outputs when enabled.
 
 ## Phase 2 - Upstream Generic Improvements To MIMOSA
 
@@ -289,10 +298,11 @@ Status:
   behavior needed by the current `motifhorde.models` facade.
 - [x] Installed `mimosa` API was checked by contract tests through the
   `motifhorde.models` compatibility boundary.
-- [ ] Upstream parity is not complete: PWM `.txt` files and compact MEME
-  headers such as `w=6` are still handled by the local compatibility wrapper.
-  Keep this wrapper until `mimosa` accepts those inputs or `motifhorde`
-  intentionally drops that legacy behavior.
+- [x] Upstream parity is sufficient for the supported MotifHORDE boundary.
+  Legacy PWM `.txt` inputs and permissive local MEME fallbacks were
+  intentionally dropped instead of preserving a local compatibility wrapper.
+  Unsupported generic formats should be implemented in MIMOSA if they are
+  needed again.
 
 ## Phase 3 - Add MIMOSA As A Dependency
 
@@ -481,6 +491,21 @@ Acceptance criteria:
 - Compatibility failures include actionable error messages.
 - Future output format is documented in README.
 
+Status:
+
+- [x] Option B was selected without adding a local conversion command: old
+  pre-MIMOSA pickles are not maintained through a motifhorde migration loader.
+  If MIMOSA rejects an old pickle, users should regenerate the model from the
+  original discovery output, MEME/PFM export, or by rerunning discovery.
+- [x] `*.pkl` files are documented as trusted joblib-pickled
+  `mimosa.GenericModel` runtime artifacts for `mimosa-tool>=1.3.0,<2`, not as
+  the long-term stable interchange format.
+- [x] `all_motifs_in_pfm_form.meme` remains the stable downstream
+  PWM-oriented export path for final selected motifs.
+- [x] Contract tests cover MIMOSA-readable pickles, unsupported pickle payload
+  rejection, final pipeline `.pkl` output rereading, and final MEME output
+  rereading.
+
 ## Phase 7 - Remove Local Duplicate Runtime Code
 
 Purpose: finish the migration and reduce maintenance burden.
@@ -537,8 +562,10 @@ Status:
   options and legacy PWM `.txt` compatibility.
 - [x] Generic model readers for MEME/BaMM/SiteGA/Jstacs/scores and old PFM/DIST
   writer helpers were removed from `src/motifhorde/io.py`.
-- [ ] Full-run external smoke tests still need to be run with external tools
-  enabled before release.
+- [x] External full-run smoke tests were run with
+  `HORDEMOTIFS_RUN_FULLRUN=1`; Jstacs Dimont and Slim smokes passed.
+- [ ] MEME full-run smoke is still skipped because the `meme` executable is not
+  available in this environment.
 
 ## Phase 8 - Stabilize Release Boundary
 
@@ -570,6 +597,19 @@ Acceptance criteria:
 
 - Future model-runtime fixes happen in one place.
 - `motifhorde` does not reintroduce local forks of generic `mimosa` code.
+
+Status:
+
+- [x] `pyproject.toml` and README define the supported dependency range as
+  `mimosa-tool>=1.3.0,<2`.
+- [x] Cross-project contract coverage lives in
+  `tests/test_model_contracts.py`: MIMOSA import/API smoke, model loading,
+  scanning, threshold calibration, site/PFM reconstruction, saved-model
+  rereading, and comparison wrappers.
+- [x] README documents the release rule: runtime behavior changes are made and
+  tested in MIMOSA first, then MotifHORDE bumps the dependency range and runs
+  contract, pipeline, and external smoke tests.
+- [x] No local generic model-runtime fork remains in production modules.
 
 ## Suggested Implementation Order
 
