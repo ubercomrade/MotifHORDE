@@ -54,11 +54,29 @@ wheels = [
 ]
 
 [[package]]
+name = "mimosa-tool"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "joblib" },
+    { name = "numba" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "scipy" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d6/a7/3f94415e4e250ed4b22cb48a7cbc589c66908a87fbd9d3698141f4445bc9/mimosa_tool-1.3.0.tar.gz", hash = "sha256:dfd021b35f8d6119af0179c194d99e7c3fd555d0d496a4e24d8c742e4fd66b79", size = 985634, upload-time = "2026-06-22T03:54:40.606Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/6e/6f10886fa7040092bd3e82ae6c637f6fdd631e6a4d466c418138e7616577/mimosa_tool-1.3.0-py3-none-any.whl", hash = "sha256:0a5662f27414426cabb416fb0cb732c2fe725e46824fa8bdcecbca261698e471", size = 83185, upload-time = "2026-06-22T03:54:39.47Z" },
+]
+
+[[package]]
 name = "motifhorde"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "joblib" },
+    { name = "mimosa-tool" },
     { name = "numba" },
     { name = "numpy" },
     { name = "pandas" },
@@ -74,6 +92,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "joblib", specifier = ">=1.5.3" },
+    { name = "mimosa-tool", specifier = ">=1.3.0,<2" },
     { name = "numba", specifier = ">=0.65.0" },
     { name = "numpy", specifier = ">=2.0,<2.4" },
     { name = "pandas", specifier = ">=2.2.3" },
@@ -381,6 +400,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "tqdm"
+version = "4.68.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/87/d7/0535a28b1f5f24f6612fb3ff1e89fb1a8d160fee0f976e0aa6803862134b/tqdm-4.68.3.tar.gz", hash = "sha256:00dfa48452b6b6cfae3dd9885636c23d3422d1ec97c66d96818cbd5e0821d482", size = 170596, upload-time = "2026-06-17T07:36:52.105Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/8e/bb97bb0c71802080bfc8952937d174e49cfc50de5c951dd47b2496f0dcdb/tqdm-4.68.3-py3-none-any.whl", hash = "sha256:39832cc2def2789a6f29df83f172db7416cea70052c0907a57801c5f2fdccb03", size = 78337, upload-time = "2026-06-17T07:36:50.132Z" },
 ]
 
 [[package]]
