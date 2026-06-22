@@ -85,17 +85,17 @@ class PerformanceEvaluator:
         prec, rec, uniq_scores_pr = precision_recall_curve(classification, scores)
         tpr, fpr, uniq_scores_roc = roc_curve(classification, scores)
 
-        auprc = float(np.trapz(prec, rec))
-        auroc = float(np.trapz(tpr, fpr))
+        auprc = float(np.trapezoid(prec, rec))
+        auroc = float(np.trapezoid(tpr, fpr))
 
         threshold_table = calculate_threshold_table(motif, negatives, strand="best")
         score_cutoff = lookup_score_for_tail_probability(threshold_table, err_threshold)
 
         tpr_cut, fpr_cut, _ = cut_roc(tpr, fpr, uniq_scores_roc, score_cutoff)
-        pauroc_raw = float(np.trapz(tpr_cut, fpr_cut))
+        pauroc_raw = float(np.trapezoid(tpr_cut, fpr_cut))
 
         rec_cut, prec_cut, _ = cut_prc(rec, prec, uniq_scores_pr, score_cutoff)
-        pauprc_raw = float(np.trapz(prec_cut, rec_cut))
+        pauprc_raw = float(np.trapezoid(prec_cut, rec_cut))
 
         e = float(fpr_cut[-1]) if len(fpr_cut) else 0.0
         r = float(rec_cut[-1]) if len(rec_cut) else 0.0
