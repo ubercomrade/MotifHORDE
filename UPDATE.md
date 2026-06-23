@@ -1,270 +1,589 @@
-# SiteGA pybind11 integration plan
+# CLI comparator and parallelism update plan
 
 ## Goal
 
-Make SiteGA a Python extension module built with the `motifhorde` package and
-use it directly from `SitegaDiscoveryTool`. SiteGA must no longer depend on the
-external `andy05cell.exe` executable or a `PATH` lookup.
+Replace the old `continuous` comparator CLI with an explicit MIMOSA comparator
+interface and make parallelism controlled by one shared CLI option.
 
-## Current state
+Backward compatibility is not required. Do not keep deprecated aliases for:
 
-- The main project uses `setuptools.build_meta` with a `src` layout.
-- SiteGA sources are in `src/sitega/`:
-  - `andy05cell.cpp`
-  - `bindings.cpp`
-  - `sitega_train.h`
-  - `setup.py`
-- `bindings.cpp` exposes a `sitega` Python module with:
-  - `sitega.TrainParams`
-  - `sitega.train(...) -> (rc, mat_path, loc_path, best_fit)`
-- `SitegaDiscoveryTool` still calls `run_sitega(...)`, which shells out to
-  `andy05cell.exe`.
-- The CLI still checks for `andy05cell.exe`; this check should be removed.
+- `-c continuous`;
+- `--c-metric`;
+- `--c-filter`;
+- `--c-threshold`;
+- `--c-search-range`;
+- `--c-jobs`;
+- `--tomtom-jobs`;
+- `--meme-p`;
+- `--jstacs-threads`.
 
-## Implementation plan
+The final interface should be smaller, explicit, and consistent across
+discovery, comparison, and external tool execution.
 
-### 1. Move SiteGA extension build into the main package
+## Current problems
 
-Keep one packaging entry point for the repository.
+### Comparator naming
 
-Changes:
+The CLI exposes:
 
-- Add `pybind11` to `[build-system].requires` in `pyproject.toml`.
-- Add a root-level `setup.py` or equivalent setuptools hook only for extension
-  module configuration.
-- Build extension module name: `sitega`.
-- Build sources:
-  - `src/sitega/bindings.cpp`
-  - `src/sitega/andy05cell.cpp`
-- Include directory:
-  - `src/sitega`
-- Use C++17.
+```text
+-c, --comparator {tomtom,continuous}
+```
 
-Rationale:
+The `continuous` name is stale. The implementation is already backed by
+`mimosa.comparison`, and the user-facing comparator should be named `mimosa`.
 
-- `pyproject.toml` remains the source of project metadata.
-- The root build config makes `sitega` part of the normal `uv sync`,
-  `pip install .`, and wheel build flow.
-- `src/sitega/setup.py` becomes redundant and should be removed after the root
-  build is working.
+### Comparison filtering
 
-### 2. Handle compiler and platform differences explicitly
+The current continuous comparator options expose:
 
-Do not hard-code Linux/GCC-only flags without a fallback.
+```text
+--c-filter {score,none}
+--c-threshold FLOAT
+```
 
-Preferred build behavior:
+This is too vague for the desired behavior. The comparison criterion should be
+one of:
 
-- Always compile with C++17.
-- Use conservative optimization first, for example `-O3` on GCC/Clang and
-  `/O2` on MSVC.
-- Avoid enabling `-ffast-math` by default unless there is a measured need. It
-  can change floating-point behavior and conflicts with the project preference
-  for correctness over clever optimization.
-- Enable OpenMP only when the platform/compiler can support it.
-- Compile without OpenMP as a supported fallback. The C++ code already guards
-  OpenMP-specific calls with `_OPENMP`.
+- `score`;
+- `p-value`.
 
-Platform notes:
+In the CLI, `p-value` means adjusted p-value. In MIMOSA result payloads the
+public dataframe column is `adj.p-value`, not `p-value`.
 
-- Linux with GCC:
-  - likely flags: `-O3`, `-fopenmp`
-  - link flags: `-fopenmp`
-  - this should be the primary tested path in the current environment.
-- Linux with Clang:
-  - `-fopenmp` may require `libomp` and extra include/library paths.
-  - if detection is not implemented, fall back to no OpenMP instead of failing
-    the build.
-- macOS with Apple Clang:
-  - OpenMP is usually unavailable by default.
-  - require `libomp` only if OpenMP support is explicitly enabled.
-  - default fallback should be a serial build.
-- Windows with MSVC:
-  - use `/std:c++17`, `/O2`, optionally `/openmp`.
-  - avoid POSIX-only assumptions in build configuration.
-  - runtime behavior still needs validation because the C++ code uses fixed-size
-    char buffers and path separators are normalized only partly in bindings.
+### P-value configuration
 
-Pragmatic first implementation:
+MIMOSA p-values require a prepared null distribution. The CLI currently has no
+way to provide that distribution to the pipeline comparator.
 
-- Add a small build helper that chooses flags by `sys.platform` and compiler
-  type.
-- Default to OpenMP on Linux/GCC.
-- Fall back to serial build on unsupported compilers instead of blocking
-  installation.
-- Keep this logic local to packaging; do not introduce a larger build framework
-  unless setuptools becomes insufficient.
+The existing `UniversalMotifComparator` constructor already accepts:
 
-### 3. Replace subprocess SiteGA execution
+- `pvalue`;
+- `null_distribution`;
+- `null_search_dirs`;
+- `effective_number_of_targets`.
 
-Update `src/motifhorde/discovery.py`.
+However, the wrapper currently calls low-level `mimosa.comparison` functions.
+Those low-level functions return score-only `ComparisonResult` records. The
+p-value annotation logic is applied at the higher-level MIMOSA API boundary.
 
-Changes:
+### Parallelism
 
-- Remove `from .execute import run_sitega`.
-- Import `sitega` lazily inside the SiteGA execution path, not at module import
-  time.
-- Call `sitega.train(...)` directly with full FASTA paths.
-- Pass:
-  - `fg_path=foreground`
-  - `bg_path=background`
-  - `max_lpd=6`
-  - `motif_len=length`
-  - `size=number_of_lpd`
-  - `olig_bg=6`
-  - `infc=1`
-  - `out_path=output_dir + os.sep`
-  - `max_peak_len=5000`
-  - `log_file="sitega.log"`
-- Check the returned `rc`.
-- Raise `RuntimeError` with a clear message if `rc != 0`.
-- Prefer reading the returned `mat_path`.
-- Keep a fallback glob for `train.fa_mat*` only if the binding returns an empty
-  path despite success.
+Parallelism is currently split across multiple options:
 
-Rationale:
+- `--tomtom-jobs` for TomTom-like motif comparison;
+- `--c-jobs` for continuous profile comparison;
+- `--meme-p` for MEME;
+- `--jstacs-threads` for Dimont and SlimDimont.
 
-- The discovery wrapper should not copy FASTA files just to satisfy the old CLI
-  calling convention.
-- The pybind11 binding already splits full paths into directory and filename.
-- Reading the returned `mat_path` makes output handling explicit and less
-  dependent on filename conventions.
+SiteGA has a `num_threads` binding parameter, but the CLI does not pass a thread
+count into `SitegaDiscoveryTool`.
 
-### 4. Remove old executable runner
+This creates inconsistent behavior and makes it unclear which option controls
+which work.
 
-Update `src/motifhorde/execute.py`.
+## Target CLI
 
-Changes:
+### Comparator selection
 
-- Remove `run_sitega(...)`.
-- Remove imports that become unused after deleting it.
+Replace comparator choices with:
 
-Rationale:
+```text
+-c, --comparator {tomtom,mimosa}
+```
 
-- Keeping both subprocess and pybind11 paths creates hidden behavior drift.
-- SiteGA should have one execution path.
+Default remains:
 
-### 5. Remove CLI dependency check for `andy05cell.exe`
+```text
+tomtom
+```
 
-Update `src/motifhorde/cli.py`.
+### Shared parallelism
 
-Changes:
+Add one shared option, preferably in `Other options`:
 
-- Delete the `sitega` branch that checks `shutil.which("andy05cell.exe")`.
-- Do not replace it with a CLI-level binary check.
+```text
+--jobs INT
+```
 
-Rationale:
+Suggested default:
 
-- SiteGA is now a Python extension module.
-- If installation is broken, discovery should fail with a Python import/build
-  error, not a misleading missing executable error.
-- This keeps dependency validation consistent with packaged Python code.
+```text
+1
+```
 
-### 6. Update docs
+Semantics:
 
-Update `README.md`.
+- `1` means sequential or single-threaded execution where supported;
+- positive values mean that exact number of workers or threads where supported;
+- `-1` means automatic all-core behavior.
 
-Changes:
+Implementation detail:
 
-- Replace the note that `sitega` requires `andy05cell.exe` in `PATH`.
-- Document that SiteGA is built as a pybind11 extension during installation.
-- Mention build requirements:
-  - C++17 compiler
-  - `pybind11` as a build dependency
-  - optional OpenMP support
-- Document that non-OpenMP builds are supported but may be slower.
+- pass `args.jobs` directly to MIMOSA comparators, because MIMOSA normalizes
+  `-1` to its automatic mode;
+- for external tools that need a positive thread count, resolve `-1` to
+  `os.cpu_count() or 1`;
+- pass `None` only to APIs where omitting the thread option is intentional.
 
-### 7. Update tests
+Add a small helper in `cli.py`:
 
-Add or update tests around the changed contract.
+```python
+def _external_thread_count(jobs: int) -> int:
+    if jobs == -1:
+        return os.cpu_count() or 1
+    return jobs
+```
 
-Unit tests:
+Validate `--jobs` once after parsing:
 
-- Add a `SitegaDiscoveryTool` test that monkeypatches a fake `sitega` module.
-- Fake `sitega.train(...)` should return `(0, mat_path, loc_path, best_fit)`.
-- Create a minimal `.mat` fixture compatible with `mimosa.read_model(...,
-  "sitega")`.
-- Assert that returned motifs are named `Sitega-1`, filtered by expected length,
-  and read from the returned `mat_path`.
+- valid values are `-1` and positive integers;
+- reject `0` and values below `-1` with `parser.error(...)`.
 
-CLI tests:
+### TomTom comparator options
 
-- Add a test that `check_external_dependencies` or the equivalent CLI path does
-  not require `andy05cell.exe` for `sitega`.
-- Keep existing `--lpd` parameter parsing tests.
+Keep:
 
-Build smoke tests:
+```text
+--tomtom-metric {pcc,ed}
+--pfm-mode
+```
 
-- Add a lightweight optional smoke check:
-  - `uv run python -c "import sitega; print(sitega.__doc__)"`
-- Keep it separate from normal unit tests if extension compilation is expensive
-  or platform-sensitive.
+Remove:
 
-### 8. Update lock/environment files if needed
+```text
+--tomtom-jobs
+```
 
-Changes:
+`TomtomComparator` should receive:
 
-- Regenerate `uv.lock` after adding `pybind11` to build requirements if uv
-  changes the lock file.
-- Add `conda-forge::openmp` to `environment.yml` so conda-based installs have
-  the OpenMP runtime available for the SiteGA extension.
-- `environment.yml` does not need a runtime `pybind11` dependency if builds are
-  performed through PEP 517 isolation.
-- Keep compiler/OpenMP notes in docs because non-conda installs still depend on
-  the platform toolchain and runtime libraries.
+```python
+n_jobs=args.jobs
+```
 
-## Verification plan
+### MIMOSA comparator options
 
-Run local checks in this order:
+Replace the old continuous group with a MIMOSA group.
+
+Suggested options:
+
+```text
+--mimosa-metric {co,co_rowwise,dice,dice_rowwise,cosine}
+--comparison-criterion {score,p-value}
+--comparison-threshold FLOAT
+--mimosa-search-range INT
+--mimosa-null-distribution PATH
+```
+
+Optional MIMOSA null-distribution search support can be added if needed:
+
+```text
+--mimosa-null-search-dir PATH
+--mimosa-effective-number-of-targets INT
+```
+
+Keep the first implementation minimal unless there is a current use case for
+search directories or explicit E-value target count. The required parameter for
+`p-value` mode is `--mimosa-null-distribution`.
+
+Defaults:
+
+- `--mimosa-metric co`;
+- `--comparison-criterion score`;
+- `--comparison-threshold` default should be derived from the criterion;
+- `--mimosa-search-range 10`.
+
+Threshold defaults:
+
+- `score`: `0.9`;
+- `p-value`: `0.05`.
+
+Do not use one hard-coded threshold default in argparse, because the correct
+default depends on the selected criterion. Set `default=None` in argparse and
+resolve the final threshold after parsing.
+
+Validation:
+
+- if `--comparison-criterion p-value` is selected, require
+  `--mimosa-null-distribution`;
+- if `--comparison-criterion score` is selected, do not enable p-value
+  annotation;
+- reject missing `adj.p-value` result columns when p-value filtering is active.
+
+## Code changes
+
+### `src/motifhorde/cli.py`
+
+Update parser examples:
+
+- replace `-c continuous --c-metric co` with
+  `-c mimosa --mimosa-metric co`;
+- add one example for adjusted p-value filtering with
+  `--comparison-criterion p-value` and `--mimosa-null-distribution`.
+
+Update comparator choices:
+
+```python
+choices=["tomtom", "mimosa"]
+```
+
+Remove old comparator options:
+
+- `--tomtom-jobs`;
+- all `--c-*` options.
+
+Add `--jobs` once.
+
+Add a post-parse validation function, for example:
+
+```python
+def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    ...
+```
+
+Keep it focused on cross-option validation:
+
+- `--jobs`;
+- `--comparison-criterion p-value` requiring
+  `--mimosa-null-distribution`;
+- threshold default resolution.
+
+Avoid scattering this validation through setup functions.
+
+Update `setup_discovery_tool(args)`:
+
+- MEME gets `threads=_external_thread_count(args.jobs)`;
+- Dimont gets `threads=_external_thread_count(args.jobs)`;
+- SlimDimont gets `threads=_external_thread_count(args.jobs)`;
+- SiteGA gets `threads=_external_thread_count(args.jobs)`;
+- STREME and BaMM remain unchanged unless a supported thread option is added
+  deliberately.
+
+Update `setup_comparator(args)`:
+
+TomTom:
+
+```python
+return TomtomComparator(
+    metric=args.tomtom_metric,
+    n_jobs=args.jobs,
+    seed=args.seed,
+    pfm_mode=args.pfm_mode,
+)
+```
+
+MIMOSA:
+
+```python
+return UniversalMotifComparator(
+    name="mimosa_comparator",
+    metric=args.mimosa_metric,
+    n_jobs=args.jobs,
+    seed=args.seed,
+    comparison_criterion=args.comparison_criterion,
+    comparison_threshold=args.comparison_threshold,
+    search_range=args.mimosa_search_range,
+    pvalue=args.comparison_criterion == "p-value",
+    null_distribution=args.mimosa_null_distribution,
+)
+```
+
+The exact parameter names on `UniversalMotifComparator` can be adjusted, but
+avoid keeping `filter_type` as a public constructor concept if the pipeline now
+uses a comparison criterion. `filter_type` is tied to the old `--c-filter`
+model and is less explicit.
+
+### `src/motifhorde/comparison.py`
+
+Keep the wrappers thin. Do not duplicate MIMOSA null distribution loading or
+p-value correction logic locally.
+
+Change `UniversalMotifComparator.compare(...)` to use the public MIMOSA API
+that applies p-value annotation:
+
+```python
+from mimosa.api import compare_one_to_many as mimosa_compare_one_to_many
+```
+
+Inside the wrapper, call the API with in-memory models:
+
+```python
+mimosa_compare_one_to_many(
+    query=motif,
+    targets=list(motifs_2),
+    strategy="profile",
+    sequences=sequences,
+    comparator=self.config,
+)
+```
+
+For `TomtomComparator`, evaluate whether it should also use the MIMOSA API with
+`strategy="motif"`. This is preferable for consistency, but only change it if
+tests confirm the output remains equivalent. If not, keep TomTom score-only for
+this update and still pass `n_jobs=args.jobs`.
+
+Normalize result frames through one helper:
+
+```python
+def _records_to_frame(records):
+    return pd.DataFrame.from_records(records)
+```
+
+MIMOSA `ComparisonResult` is mapping-like and emits public columns such as:
+
+- `score`;
+- `p-value`;
+- `adj.p-value`;
+- `E-value`.
+
+Do not rename MIMOSA output columns globally. Instead, map CLI criterion to the
+column used by MotifHORDE filtering.
+
+Suggested helper:
+
+```python
+def comparison_column_for_criterion(criterion: str) -> str:
+    if criterion == "score":
+        return "score"
+    if criterion == "p-value":
+        return "adj.p-value"
+    raise ValueError(...)
+```
+
+### `src/motifhorde/pipeline.py`
+
+The pipeline currently infers the comparison column from dataframe columns:
+
+```python
+def _comparison_column(frame: pd.DataFrame) -> str:
+    if "p-value" in frame.columns:
+        return "p-value"
+    if "score" in frame.columns:
+        return "score"
+```
+
+Replace implicit inference with explicit comparator configuration.
+
+Add a small comparator-facing contract:
+
+- comparator has `comparison_criterion`;
+- comparator has `comparison_threshold`;
+- comparator can expose `comparison_column`.
+
+Keep this simple. Do not introduce abstract base classes or config objects for
+this unless the code becomes materially clearer.
+
+Filtering rules:
+
+- `score`: similar if `score >= threshold`;
+- `p-value`: similar if `adj.p-value <= threshold`.
+
+Sorting rules:
+
+- `score`: descending;
+- `p-value`: ascending.
+
+Update these functions to use the explicit column and direction:
+
+- `_filter_similar_matches`;
+- `_sort_comparisons`;
+- `_is_similar_value`;
+- `_comparison_sort_ascending`;
+- `_comparison_column`.
+
+Prefer passing the comparator or criterion into these helpers rather than using
+module-level constants. The old constants:
+
+```python
+SIMILARITY_PVALUE_THRESHOLD = 0.001
+SIMILARITY_SCORE_THRESHOLD = 0.9
+```
+
+should either be removed or replaced by named defaults in one place. Avoid
+keeping stale constants that no longer control behavior.
+
+Places that call `_filter_similar_matches` must be updated:
+
+- `_compare_bootstrap_motifs`;
+- `_select_best_full_motif`;
+- `_select_nonredundant_motifs`;
+- `_deduplicate_final_motifs`.
+
+When p-value mode is active and `adj.p-value` is missing, raise a clear error:
+
+```text
+Comparison results do not contain adjusted p-values. Provide a compatible MIMOSA
+null distribution with --mimosa-null-distribution.
+```
+
+### `src/motifhorde/discovery.py`
+
+Update `SitegaDiscoveryTool`:
+
+- add `threads: int | None = None` to `__init__`;
+- store `self.threads`;
+- pass `num_threads=self.threads or 0` to `sitega.train(...)`.
+
+Use `0` only if the SiteGA binding contract still means "use OMP_NUM_THREADS".
+If the CLI always passes a resolved positive value, passing `self.threads`
+directly is simpler.
+
+Do not add thread parameters to tools that do not support them.
+
+Current supported mappings:
+
+- MEME: `-p`;
+- Dimont: `threads=...`;
+- SlimDimont: `threads=...`;
+- SiteGA: `num_threads=...`.
+
+STREME and BaMM remain unchanged in this update.
+
+## Documentation changes
+
+Update `README.md`:
+
+- replace `-c continuous` with `-c mimosa`;
+- replace `--c-metric` with `--mimosa-metric`;
+- document `--comparison-criterion score|p-value`;
+- document that CLI `p-value` means MIMOSA `adj.p-value`;
+- document that p-value mode requires `--mimosa-null-distribution`;
+- document `--jobs` as the single parallelism option;
+- remove references to `--tomtom-jobs`, `--c-jobs`, `--meme-p`, and
+  `--jstacs-threads`.
+
+Add a short example:
 
 ```bash
-uv sync
-uv run python -c "import sitega; print(sitega.__doc__)"
-uv run pytest tests/test_cli_tools.py
-uv run pytest tests/test_sitega_discovery.py
+motifhorde peaks.fa bg.fa promoters.fa output/ \
+  -c mimosa \
+  --mimosa-metric co \
+  --comparison-criterion p-value \
+  --mimosa-null-distribution profile-null.joblib \
+  --jobs -1
+```
+
+## Tests
+
+### CLI parser tests
+
+Update `tests/test_cli_tools.py` or add focused CLI tests:
+
+- parser accepts `-c mimosa`;
+- parser rejects `-c continuous`;
+- help includes `--mimosa-metric`, `--comparison-criterion`,
+  `--mimosa-null-distribution`, and `--jobs`;
+- help does not include removed options;
+- `--comparison-criterion p-value` without `--mimosa-null-distribution` fails;
+- `--jobs 0` fails;
+- `--jobs -2` fails.
+
+### Comparator setup tests
+
+Add tests for `setup_comparator(args)`:
+
+- TomTom receives `n_jobs=args.jobs`;
+- MIMOSA receives `n_jobs=args.jobs`;
+- MIMOSA score mode sets `pvalue=False`;
+- MIMOSA p-value mode sets `pvalue=True` and passes the null distribution path;
+- MIMOSA p-value criterion maps to `adj.p-value`.
+
+### Pipeline filtering tests
+
+Add or update tests around the pure filtering helpers:
+
+- score mode keeps rows with `score >= threshold`;
+- score mode sorts descending;
+- p-value mode keeps rows with `adj.p-value <= threshold`;
+- p-value mode sorts ascending;
+- p-value mode raises a clear error when `adj.p-value` is missing.
+
+Keep these tests small and dataframe-based. Do not require real MIMOSA null
+distribution files for pipeline filtering behavior.
+
+### Discovery thread propagation tests
+
+Update existing discovery tests:
+
+- MEME command includes `-p <jobs>`;
+- Dimont args include `threads=<jobs>`;
+- SlimDimont args include `threads=<jobs>`;
+- SiteGA `sitega.train(...)` receives `num_threads=<jobs>`.
+
+Add CLI setup tests:
+
+- `--jobs 3 -t meme` creates `MemeDiscoveryTool` with `threads == 3`;
+- `--jobs 3 -t dimont` creates `DimontDiscoveryTool` with `threads == 3`;
+- `--jobs 3 -t slim` creates `SlimDiscoveryTool` with `threads == 3`;
+- `--jobs 3 -t sitega` creates `SitegaDiscoveryTool` with `threads == 3`.
+
+For `--jobs -1`, monkeypatch `os.cpu_count()` and assert external tool thread
+counts receive the resolved positive value.
+
+### MIMOSA p-value integration test
+
+Add one focused test around `UniversalMotifComparator` with monkeypatched MIMOSA
+API:
+
+- monkeypatch `motifhorde.comparison.mimosa_compare_one_to_many`;
+- return one `ComparisonResult` or dict containing `adj.p-value`;
+- assert `UniversalMotifComparator.compare(...)` returns a frame with
+  `adj.p-value`.
+
+This verifies MotifHORDE uses the API boundary that can annotate p-values
+without requiring an expensive real null distribution fixture.
+
+## Implementation order
+
+1. Update CLI parser and argument validation.
+2. Add shared `--jobs` plumbing into comparator setup.
+3. Add shared `--jobs` plumbing into discovery setup.
+4. Extend `SitegaDiscoveryTool` to accept and pass thread count.
+5. Update `UniversalMotifComparator` to use MIMOSA API for one-to-many
+   comparison.
+6. Replace implicit pipeline comparison-column detection with explicit criterion
+   and threshold handling.
+7. Update tests for parser, setup, filtering, and thread propagation.
+8. Update README examples and option documentation.
+9. Run formatting and tests.
+
+Suggested verification commands:
+
+```bash
 uv run ruff check .
+uv run pytest
 ```
 
-Optional full pipeline check:
+If external smoke tests are needed, run them separately because they depend on
+installed external tools and are slower.
 
-```bash
-HORDEMOTIFS_RUN_FULLRUN=1 uv run pytest tests/test_external_fullrun.py -k sitega
-```
+## Expected behavior changes
 
-## Main risks and mitigations
+Breaking CLI changes:
 
-- OpenMP flags are compiler-specific.
-  Mitigation: add `conda-forge::openmp` for conda environments, detect
-  platform/compiler in the build, and fall back to serial build when OpenMP is
-  unavailable.
+- `-c continuous` is invalid;
+- all `--c-*` options are invalid;
+- `--tomtom-jobs` is invalid;
+- `--meme-p` is invalid;
+- `--jstacs-threads` is invalid.
 
-- macOS may not have OpenMP available.
-  Mitigation: do not require OpenMP by default on macOS; document optional
-  `libomp` setup later if needed.
+New behavior:
 
-- Windows build may expose path or compiler assumptions in the adapted C++ code.
-  Mitigation: keep the first implementation portable at the setuptools flag
-  level, then validate Windows separately before claiming support.
+- `-c mimosa` selects profile comparison through MIMOSA;
+- `--jobs` controls all supported comparison and discovery parallelism;
+- score filtering uses `score >= threshold`;
+- p-value filtering uses `adj.p-value <= threshold`;
+- p-value mode requires a prepared MIMOSA null distribution.
 
-- Fixed-size C buffers in `andy05cell.cpp` may fail on very long paths.
-  Mitigation: use short output paths in tests and document this as a known C++
-  limitation if not fixed now.
+## Compatibility risks
 
-- `sitega` top-level module name could conflict with an unrelated installed
-  package named `sitega`.
-  Mitigation: acceptable for now because the binding is intentionally imported
-  as `sitega`; revisit only if an actual conflict appears.
+The main risk is that existing scripts using old CLI options will fail. This is
+acceptable because backward compatibility is explicitly not required.
 
-- Build isolation may hide missing compiler errors until install time.
-  Mitigation: keep the build dependency list explicit and add the import smoke
-  check to verification.
+The second risk is p-value support through MIMOSA API. This should be tested
+with a monkeypatched unit test first, then with one real compatible null
+distribution file if a fixture is available.
 
-## Definition of done
-
-- `sitega` imports after installing the project.
-- `SitegaDiscoveryTool` calls `sitega.train(...)` directly.
-- No code path calls `andy05cell.exe`.
-- CLI no longer checks for `andy05cell.exe`.
-- `run_sitega(...)` is removed.
-- Documentation reflects pybind11 extension build requirements.
-- Unit tests cover the new Python-module execution path.
-- Ruff and targeted pytest checks pass.
+The third risk is `--jobs -1` behavior for external tools. Resolve it once in
+CLI setup and pass only positive thread counts to tools that require positive
+values.
