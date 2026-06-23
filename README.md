@@ -63,9 +63,10 @@ The implemented workflow is:
    ([Vorontsov et al., 2013](https://doi.org/10.1186/1748-7188-8-23);
    [Lambert et al., 2016](https://doi.org/10.1093/bioinformatics/btw489)).
 7. **Deduplicate matched validation pairs within each parameter set.**
-   Comparison results are sorted by p-value when Monte Carlo p-values are
-   available, otherwise by similarity score. The pipeline then keeps one match
-   per query motif and one match per target motif for the current parameter set.
+   Comparison results are sorted by the configured comparison criterion:
+   descending score or ascending adjusted p-value. The pipeline then keeps one
+   match per query motif and one match per target motif for the current
+   parameter set.
 8. **Assign validation performance to matched pairs.** For every retained
    odd/even pair, MotifHORDE averages the validation metrics of the two matched
    motifs. These averaged metrics represent how well a reproducible motif
@@ -75,8 +76,8 @@ The implemented workflow is:
 10. **Select final full-data motifs.** Each full-data motif is compared with the
     corresponding odd/even validation references. A full-data motif is retained
     only if it is similar to both references, then the best match is selected
-    using the comparator direction: lower averaged p-value for p-value based
-    comparisons, or higher averaged score for score based comparisons.
+    using the comparator direction: lower averaged adjusted p-value for p-value
+    based comparisons, or higher averaged score for score based comparisons.
 11. **Globally remove redundant final motifs.** After all retained parameter
     groups have been processed, selected full-data motifs are sorted by the
     requested validation metric and redundant motifs across parameter settings
@@ -87,9 +88,10 @@ The implemented workflow is:
     MEME-format PFM file. For non-PWM models, the PFM is reconstructed from
     predicted sites on the provided promoter sequences.
 
-Across the selection pipeline, motifs are treated as similar when comparison
-results have `p-value <= 0.001` or `score >= 0.9`. These method-level thresholds
-are fixed inside the pipeline rather than exposed as separate selection flags.
+Across the selection pipeline, motifs are treated as similar by the configured
+comparison criterion. Score mode keeps matches with `score >=
+--comparison-threshold` and defaults to `0.9`. P-value mode keeps matches with
+MIMOSA `adj.p-value <= --comparison-threshold` and defaults to `0.05`.
 
 ## Supported Models
 
@@ -160,16 +162,14 @@ comparison derives PFMs by scanning sequences and using the top-scoring predicte
 sites. This makes heterogeneous model comparison possible without requiring both
 models to share the same internal representation.
 
-Pipeline selection uses the fixed method-level similarity rule: `p-value <=
-0.001` when MIMOSA null distributions are configured, otherwise `score >= 0.9`.
-Tomtom-like results are sorted by p-value when distribution-backed p-values are
-present.
+Tomtom-like pipeline selection uses score filtering and sorting by default.
+`--jobs` controls Tomtom comparison parallelism.
 
-### Continuous Profile Comparator
+### MIMOSA Profile Comparator
 
-`-c continuous` compares the recognition profiles produced by motif models on
-the same sequence set. Models are compared by their functional output rather
-than only by their internal parameters.
+`-c mimosa` compares the recognition profiles produced by motif models on the
+same sequence set. Models are compared by their functional output rather than
+only by their internal parameters.
 
 Supported metrics:
 
@@ -179,9 +179,16 @@ Supported metrics:
 - `dice_rowwise`: row-wise continuous Dice;
 - `cosine`: row-wise cosine similarity.
 
-Profile comparison uses the MIMOSA profile runtime directly. Significance
-estimation should be configured through MIMOSA null distributions rather than
-the removed local Monte Carlo surrogate generator.
+Use `--mimosa-metric` to select the profile metric. Use
+`--comparison-criterion score|p-value` to select filtering behavior. In the CLI,
+`p-value` means MIMOSA adjusted p-value, exposed in result frames as
+`adj.p-value`. P-value mode requires a prepared null distribution passed with
+`--mimosa-null-distribution`.
+
+`--jobs` is the single parallelism option for comparison and supported
+discovery tools. `--jobs 1` is single-threaded, positive values request that
+exact count where supported, and `--jobs -1` uses all available cores where the
+underlying tool supports automatic or resolved all-core execution.
 
 ## Evaluation
 
@@ -292,19 +299,27 @@ motifhorde peaks.fa background.fa promoters.fa output/ \
   -l 10-16-2 \
   --lpd 10-40-10
 
-# Continuous profile comparison instead of matrix comparison
+# MIMOSA profile comparison instead of matrix comparison
 motifhorde peaks.fa background.fa promoters.fa output/ \
   -t dimont \
   -l 10,12,14 \
-  -c continuous \
-  --c-metric co
+  -c mimosa \
+  --mimosa-metric co
+
+# MIMOSA adjusted p-value filtering
+motifhorde peaks.fa background.fa promoters.fa output/ \
+  -c mimosa \
+  --mimosa-metric co \
+  --comparison-criterion p-value \
+  --mimosa-null-distribution profile-null.joblib \
+  --jobs -1
 
 # Jstacs tools with explicit Java settings
 motifhorde peaks.fa background.fa promoters.fa output/ \
   -t slim \
   -l 12 \
   --java-xmx 8G \
-  --jstacs-threads 4
+  --jobs 4
 ```
 
 ## Output Layout
@@ -391,11 +406,11 @@ from motifhorde.comparison import TomtomComparator, UniversalMotifComparator
 tomtom = TomtomComparator(metric="pcc", seed=1)
 matrix_results = tomtom.compare([model_a], [model_b], sequences=sequences)
 
-continuous = UniversalMotifComparator(
+mimosa = UniversalMotifComparator(
     metric="co",
     seed=1,
 )
-profile_results = continuous.compare([model_a], [model_b], sequences=sequences)
+profile_results = mimosa.compare([model_a], [model_b], sequences=sequences)
 ```
 
 Programmatic full pipeline:

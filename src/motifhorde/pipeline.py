@@ -14,13 +14,17 @@ from mimosa import GenericModel, get_pfm
 from mimosa.batches import SequenceBatch
 from mimosa.functions import format_params
 
-from .comparison import TomtomComparator, UniversalMotifComparator
+from .comparison import (
+    MISSING_ADJUSTED_PVALUE_MESSAGE,
+    TomtomComparator,
+    UniversalMotifComparator,
+    comparison_column_for_criterion,
+    default_threshold_for_criterion,
+)
 from .discovery import MotifDiscoveryTool
 from .evaluation import Bootstrapper, PerformanceEvaluator
 from .io import read_fasta, write_meme
 
-SIMILARITY_PVALUE_THRESHOLD = 0.001
-SIMILARITY_SCORE_THRESHOLD = 0.9
 VALIDATION_METRICS = ("auPRC", "auROC", "pauPRC", "pauROC")
 
 
@@ -184,10 +188,10 @@ class DeNovoPipeline:
             frame = self.comparator.compare(
                 odd_selected, even_selected, sequences=peaks
             )
-            frame = _filter_similar_matches(frame)
+            frame = _filter_similar_matches(frame, self.comparator)
             if frame.empty:
                 continue
-            frame = _deduplicate_matches(_sort_comparisons(frame))
+            frame = _deduplicate_matches(_sort_comparisons(frame, self.comparator))
             for key, value in current_params.items():
                 frame[key] = value
             frame = _attach_average_metrics(frame, statistics)
@@ -292,8 +296,8 @@ class DeNovoPipeline:
             full_motifs, even_ref, sequences=sequences
         )
 
-        compare_metric = _comparison_column(comparison_odd)
-        _comparison_column(comparison_even)
+        compare_metric = _comparison_column(comparison_odd, self.comparator)
+        _comparison_column(comparison_even, self.comparator)
 
         candidates = []
         for motif in full_motifs:
@@ -307,9 +311,9 @@ class DeNovoPipeline:
                 continue
             odd_value = float(odd_values[0])
             even_value = float(even_values[0])
-            if not _is_similar_value(compare_metric, odd_value):
+            if not _is_similar_value(self.comparator, odd_value):
                 continue
-            if not _is_similar_value(compare_metric, even_value):
+            if not _is_similar_value(self.comparator, even_value):
                 continue
             candidates.append((motif, (odd_value + even_value) / 2.0))
 
@@ -318,7 +322,7 @@ class DeNovoPipeline:
         return sorted(
             candidates,
             key=lambda item: item[1],
-            reverse=not _comparison_sort_ascending(compare_metric),
+            reverse=not _comparison_sort_ascending(self.comparator),
         )[0][0]
 
     def _save_results(
@@ -416,42 +420,62 @@ def _bootstrap_motifs_for_params(
     return odd_motifs, even_motifs
 
 
-def _comparison_column(frame: pd.DataFrame) -> str:
-    if "p-value" in frame.columns:
-        return "p-value"
-    if "score" in frame.columns:
-        return "score"
-    raise ValueError("Comparison must contain either 'p-value' or 'score'.")
+def _comparison_column(frame: pd.DataFrame, comparator) -> str:
+    criterion = getattr(comparator, "comparison_criterion", None)
+    if criterion is None:
+        raise ValueError("Comparator must define comparison_criterion.")
+
+    column = getattr(
+        comparator,
+        "comparison_column",
+        comparison_column_for_criterion(criterion),
+    )
+    if column in frame.columns:
+        return column
+    if column == "adj.p-value":
+        raise ValueError(MISSING_ADJUSTED_PVALUE_MESSAGE)
+    raise ValueError(f"Comparison results do not contain comparison column: {column}")
 
 
-def _comparison_sort_ascending(column: str) -> bool:
-    if column == "p-value":
+def _comparison_sort_ascending(comparator) -> bool:
+    criterion = getattr(comparator, "comparison_criterion", None)
+    if criterion == "p-value":
         return True
-    if column == "score":
+    if criterion == "score":
         return False
-    raise ValueError("Comparison column must be either 'p-value' or 'score'.")
+    raise ValueError(f"Unsupported comparison criterion: {criterion}")
 
 
-def _is_similar_value(column: str, value: float) -> bool:
+def _comparison_threshold(comparator) -> float:
+    criterion = getattr(comparator, "comparison_criterion", None)
+    threshold = getattr(comparator, "comparison_threshold", None)
+    if threshold is None:
+        return default_threshold_for_criterion(criterion)
+    return float(threshold)
+
+
+def _is_similar_value(comparator, value: float) -> bool:
     if pd.isna(value):
         return False
-    if column == "p-value":
-        return value <= SIMILARITY_PVALUE_THRESHOLD
-    if column == "score":
-        return value >= SIMILARITY_SCORE_THRESHOLD
-    raise ValueError("Comparison column must be either 'p-value' or 'score'.")
+    criterion = getattr(comparator, "comparison_criterion", None)
+    threshold = _comparison_threshold(comparator)
+    if criterion == "p-value":
+        return value <= threshold
+    if criterion == "score":
+        return value >= threshold
+    raise ValueError(f"Unsupported comparison criterion: {criterion}")
 
 
-def _filter_similar_matches(frame: pd.DataFrame) -> pd.DataFrame:
-    column = _comparison_column(frame)
-    mask = frame[column].map(lambda value: _is_similar_value(column, float(value)))
+def _filter_similar_matches(frame: pd.DataFrame, comparator) -> pd.DataFrame:
+    column = _comparison_column(frame, comparator)
+    mask = frame[column].map(lambda value: _is_similar_value(comparator, float(value)))
     return frame[mask].reset_index(drop=True)
 
 
-def _sort_comparisons(frame: pd.DataFrame) -> pd.DataFrame:
-    column = _comparison_column(frame)
+def _sort_comparisons(frame: pd.DataFrame, comparator) -> pd.DataFrame:
+    column = _comparison_column(frame, comparator)
     return frame.sort_values(
-        by=column, ascending=_comparison_sort_ascending(column)
+        by=column, ascending=_comparison_sort_ascending(comparator)
     ).reset_index(drop=True)
 
 
@@ -482,7 +506,7 @@ def _select_nonredundant_motifs(
             continue
 
         frame = comparator.compare([motif], selected, sequences=sequences)
-        similar = _filter_similar_matches(frame)
+        similar = _filter_similar_matches(frame, comparator)
         if similar.empty:
             selected.append(motif)
     return selected
@@ -535,7 +559,7 @@ def _deduplicate_final_motifs(
             continue
 
         frame = comparator.compare([motif], kept_motifs, sequences=sequences)
-        similar = _filter_similar_matches(frame)
+        similar = _filter_similar_matches(frame, comparator)
         if similar.empty:
             kept_indices.append(index)
             kept_motifs.append(motif)

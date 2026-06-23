@@ -4,6 +4,11 @@ import pandas as pd
 import pytest
 
 from motifhorde.models import GenericModel
+from motifhorde.comparison import (
+    MISSING_ADJUSTED_PVALUE_MESSAGE,
+    comparison_column_for_criterion,
+    default_threshold_for_criterion,
+)
 from motifhorde.pipeline import (
     DeNovoPipeline,
     _comparison_column,
@@ -21,19 +26,34 @@ def motif(name: str) -> GenericModel:
 
 
 class FakeComparator:
-    def __init__(self, column: str, values: dict[tuple[str, str], float]) -> None:
-        self.column = column
+    def __init__(
+        self,
+        criterion: str,
+        values: dict[tuple[str, str], float],
+        threshold: float | None = None,
+    ) -> None:
+        self.comparison_criterion = criterion
+        self.comparison_column = comparison_column_for_criterion(criterion)
+        self.comparison_threshold = (
+            default_threshold_for_criterion(criterion)
+            if threshold is None
+            else threshold
+        )
         self.values = values
 
     def compare(self, motifs_1, motifs_2, sequences=None):
         return pd.DataFrame(
             [
-                {"query": query.name, "target": target.name, self.column: value}
+                {
+                    "query": query.name,
+                    "target": target.name,
+                    self.comparison_column: value,
+                }
                 for query in motifs_1
                 for target in motifs_2
                 if (value := self.values.get((query.name, target.name))) is not None
             ],
-            columns=["query", "target", self.column],
+            columns=["query", "target", self.comparison_column],
         )
 
 
@@ -50,17 +70,20 @@ def stats(names: list[str], metric_values: list[float]) -> dict[str, dict[str, f
 
 
 def test_similarity_thresholds_are_inclusive():
-    assert _is_similar_value("p-value", 0.001)
-    assert not _is_similar_value("p-value", 0.0011)
-    assert _is_similar_value("score", 0.9)
-    assert not _is_similar_value("score", 0.899)
+    pvalue = FakeComparator("p-value", {})
+    score = FakeComparator("score", {})
+
+    assert _is_similar_value(pvalue, 0.05)
+    assert not _is_similar_value(pvalue, 0.0501)
+    assert _is_similar_value(score, 0.9)
+    assert not _is_similar_value(score, 0.899)
 
 
 def test_sort_comparisons_uses_comparison_direction():
     pvalue_frame = pd.DataFrame(
         [
-            {"query": "q2", "target": "t2", "p-value": 0.002},
-            {"query": "q1", "target": "t1", "p-value": 0.001},
+            {"query": "q2", "target": "t2", "adj.p-value": 0.002},
+            {"query": "q1", "target": "t1", "adj.p-value": 0.001},
         ]
     )
     score_frame = pd.DataFrame(
@@ -69,21 +92,23 @@ def test_sort_comparisons_uses_comparison_direction():
             {"query": "q1", "target": "t1", "score": 0.95},
         ]
     )
+    pvalue = FakeComparator("p-value", {})
+    score = FakeComparator("score", {})
 
-    assert list(_sort_comparisons(pvalue_frame)["query"]) == ["q1", "q2"]
-    assert list(_sort_comparisons(score_frame)["query"]) == ["q1", "q2"]
+    assert list(_sort_comparisons(pvalue_frame, pvalue)["query"]) == ["q1", "q2"]
+    assert list(_sort_comparisons(score_frame, score)["query"]) == ["q1", "q2"]
 
-    with pytest.raises(ValueError):
-        _comparison_column(pd.DataFrame([{"query": "q", "target": "t"}]))
+    with pytest.raises(ValueError, match=MISSING_ADJUSTED_PVALUE_MESSAGE):
+        _comparison_column(pd.DataFrame([{"query": "q", "target": "t"}]), pvalue)
 
 
 def test_deduplicate_matches_keeps_first_query_and_target_matches():
     frame = pd.DataFrame(
         [
-            {"query": "q1", "target": "t1", "p-value": 0.0001},
-            {"query": "q1", "target": "t2", "p-value": 0.0002},
-            {"query": "q2", "target": "t1", "p-value": 0.0003},
-            {"query": "q3", "target": "t3", "p-value": 0.0004},
+            {"query": "q1", "target": "t1", "adj.p-value": 0.0001},
+            {"query": "q1", "target": "t2", "adj.p-value": 0.0002},
+            {"query": "q2", "target": "t1", "adj.p-value": 0.0003},
+            {"query": "q3", "target": "t3", "adj.p-value": 0.0004},
         ]
     )
 
@@ -137,7 +162,9 @@ def test_bootstrap_matching_is_parameter_local():
         bootstrap_motifs,
         {"length": [8, 10]},
         peaks=None,
-        statistics=stats([model.name for model in bootstrap_motifs], [0.9, 0.8, 0.7, 0.6, 0.5]),
+        statistics=stats(
+            [model.name for model in bootstrap_motifs], [0.9, 0.8, 0.7, 0.6, 0.5]
+        ),
         metric="pauROC",
     )
 
@@ -150,14 +177,19 @@ def test_bootstrap_matching_is_parameter_local():
 
 
 def test_select_best_full_motif_requires_similarity_to_both_references_pvalue():
-    full_motifs = [motif("full_odd_only"), motif("full_even_only"), motif("full_best"), motif("full_second")]
+    full_motifs = [
+        motif("full_odd_only"),
+        motif("full_even_only"),
+        motif("full_best"),
+        motif("full_second"),
+    ]
     bootstrap_motifs = [motif("odd_ref"), motif("even_ref")]
     comparator = FakeComparator(
         "p-value",
         {
             ("full_odd_only", "odd_ref"): 0.0001,
-            ("full_odd_only", "even_ref"): 0.01,
-            ("full_even_only", "odd_ref"): 0.01,
+            ("full_odd_only", "even_ref"): 0.06,
+            ("full_even_only", "odd_ref"): 0.06,
             ("full_even_only", "even_ref"): 0.0001,
             ("full_best", "odd_ref"): 0.0002,
             ("full_best", "even_ref"): 0.0004,
@@ -167,7 +199,9 @@ def test_select_best_full_motif_requires_similarity_to_both_references_pvalue():
     )
     pipeline = DeNovoPipeline(None, None, comparator)
 
-    selected = pipeline._select_best_full_motif(full_motifs, "odd_ref", "even_ref", bootstrap_motifs, peaks=None)
+    selected = pipeline._select_best_full_motif(
+        full_motifs, "odd_ref", "even_ref", bootstrap_motifs, peaks=None
+    )
 
     assert selected is not None
     assert selected.name == "full_best"
@@ -187,13 +221,16 @@ def test_select_best_full_motif_uses_highest_average_score():
     )
     pipeline = DeNovoPipeline(None, None, comparator)
 
-    selected = pipeline._select_best_full_motif(full_motifs, "odd_ref", "even_ref", bootstrap_motifs, peaks=None)
+    selected = pipeline._select_best_full_motif(
+        full_motifs, "odd_ref", "even_ref", bootstrap_motifs, peaks=None
+    )
 
     assert selected is not None
     assert selected.name == "full_best"
 
 
 def test_filter_similar_matches_rejects_non_similar_rows():
+    comparator = FakeComparator("score", {})
     frame = pd.DataFrame(
         [
             {"query": "q1", "target": "t1", "score": 0.9},
@@ -201,9 +238,31 @@ def test_filter_similar_matches_rejects_non_similar_rows():
         ]
     )
 
-    observed = _filter_similar_matches(frame)
+    observed = _filter_similar_matches(frame, comparator)
 
     assert list(observed["query"]) == ["q1"]
+
+
+def test_filter_similar_matches_uses_adjusted_pvalue_threshold():
+    comparator = FakeComparator("p-value", {})
+    frame = pd.DataFrame(
+        [
+            {"query": "q1", "target": "t1", "adj.p-value": 0.05},
+            {"query": "q2", "target": "t2", "adj.p-value": 0.051},
+        ]
+    )
+
+    observed = _filter_similar_matches(frame, comparator)
+
+    assert list(observed["query"]) == ["q1"]
+
+
+def test_pvalue_filtering_requires_adjusted_pvalue_column():
+    comparator = FakeComparator("p-value", {})
+    frame = pd.DataFrame([{"query": "q1", "target": "t1", "p-value": 0.01}])
+
+    with pytest.raises(ValueError, match=MISSING_ADJUSTED_PVALUE_MESSAGE):
+        _filter_similar_matches(frame, comparator)
 
 
 def test_final_global_deduplication_keeps_best_metric_motif():

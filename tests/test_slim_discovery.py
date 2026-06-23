@@ -21,16 +21,22 @@ def test_build_slim_args_contains_jstacs_parameters():
         -5,
         False,
         2,
-        None,
+        3,
     )
 
-    assert args[:5] == ["java", "-Djava.awt.headless=true", "-Xmx2G", "-jar", "SlimDimont.jar"]
+    assert args[:5] == [
+        "java",
+        "-Djava.awt.headless=true",
+        "-Xmx2G",
+        "-jar",
+        "SlimDimont.jar",
+    ]
     assert "infix=slim" in args
     assert "motifWidth=8" in args
     assert "motifOrder=-5" in args
     assert "starts=2" in args
     assert "modify=false" in args
-    assert not any(arg.startswith("threads=") for arg in args)
+    assert "threads=3" in args
 
 
 def test_slim_discovery_writes_fasta_and_reads_generic_model(monkeypatch, tmp_path):
@@ -59,7 +65,9 @@ def test_slim_discovery_writes_fasta_and_reads_generic_model(monkeypatch, tmp_pa
         length=8,
     )
 
-    assert (output_dir / "train.annot.fa").read_text() == "> position: 4; value: 1.0\nACGTACGT\n"
+    assert (
+        output_dir / "train.annot.fa"
+    ).read_text() == "> position: 4; value: 1.0\nACGTACGT\n"
     assert len(motifs) == 1
     assert motifs[0].type_key == "slim"
     assert motifs[0].name == "Slim-1"

@@ -57,6 +57,7 @@ def test_meme_discovery_reads_generic_models(monkeypatch, tmp_path):
     assert "-nomatrim" in calls[0]
     assert "-seed" in calls[0]
     assert "-p" in calls[0]
+    assert calls[0][calls[0].index("-p") + 1] == "2"
 
 
 def test_meme_discovery_reads_full_meme_report(monkeypatch, tmp_path):

@@ -36,7 +36,7 @@ def _run_cli(
             "6",
             "-n",
             "1",
-            "--jstacs-threads",
+            "--jobs",
             "1",
             "--dimont-starts",
             "1",

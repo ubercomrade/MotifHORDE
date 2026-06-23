@@ -101,8 +101,8 @@ def test_comparator_wrappers(pwm_model, sequence_batch):
     motif_frame = tomtom.compare([pwm_model], [second], sequences=sequence_batch)
     assert motif_frame.loc[0, "query"] == "M1"
 
-    continuous = UniversalMotifComparator(metric="co", n_jobs=1)
-    profile_frame = continuous.compare([pwm_model], [second], sequences=sequence_batch)
+    mimosa = UniversalMotifComparator(metric="co", n_jobs=1)
+    profile_frame = mimosa.compare([pwm_model], [second], sequences=sequence_batch)
     assert profile_frame.loc[0, "target"] == "M2"
 
 

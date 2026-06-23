@@ -30,6 +30,7 @@ from motifhorde.evaluation import PerformanceEvaluator
 from motifhorde.comparison import (
     UniversalMotifComparator,
     TomtomComparator,
+    default_threshold_for_criterion,
 )
 
 
@@ -101,9 +102,12 @@ def create_arg_parser() -> argparse.ArgumentParser:
       # Multiple specific values using comma-separated format
       motifhorde peaks.fa bg.fa promoters.fa output/ -t bamm -l 10,12,14 -o 1,2,3
     
-      # Continuous profile comparison
-      motifhorde peaks.fa bg.fa promoters.fa output/ -c continuous --c-metric co
-    
+      # MIMOSA profile comparison
+      motifhorde peaks.fa bg.fa promoters.fa output/ -c mimosa --mimosa-metric co
+
+      # MIMOSA adjusted p-value filtering
+      motifhorde peaks.fa bg.fa promoters.fa output/ -c mimosa --comparison-criterion p-value --mimosa-null-distribution profile-null.joblib
+
       # Matrix comparison with Pearson correlation
       motifhorde peaks.fa bg.fa promoters.fa output/ -c tomtom --tomtom-metric pcc
     """,
@@ -189,10 +193,6 @@ def create_arg_parser() -> argparse.ArgumentParser:
     discovery.add_argument(
         "--meme-seed", type=int, default=None, help="MEME random seed"
     )
-    discovery.add_argument("--meme-p", type=int, default=None, help="MEME thread count")
-    discovery.add_argument(
-        "--jstacs-threads", type=int, default=None, help="Jstacs thread count"
-    )
     discovery.add_argument(
         "--jstacs-position-tag",
         default="position",
@@ -258,7 +258,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
     comparison.add_argument(
         "-c",
         "--comparator",
-        choices=["tomtom", "continuous"],
+        choices=["tomtom", "mimosa"],
         default="tomtom",
         help="Method used for comparing discovered motifs (default: %(default)s)",
     )
@@ -272,51 +272,50 @@ def create_arg_parser() -> argparse.ArgumentParser:
         help="Distance metric for TomTom comparison. 'pcc' is Pearson Correlation Coefficient; 'ed' is Euclidean Distance (default: %(default)s)",
     )
     tomtom.add_argument(
-        "--tomtom-jobs",
-        type=int,
-        default=1,
-        help="Number of parallel jobs for TomTom calculations (default: %(default)s)",
-    )
-    tomtom.add_argument(
         "--pfm-mode",
         action="store_true",
         help="If set, derive PFMs by scanning sequences and using the top 5%% of predicted binding sites",
     )
 
-    continuous = parser.add_argument_group("Continuous comparator options")
-    continuous.add_argument(
-        "--c-metric",
+    mimosa = parser.add_argument_group("MIMOSA comparator options")
+    mimosa.add_argument(
+        "--mimosa-metric",
         choices=["co", "co_rowwise", "dice", "dice_rowwise", "cosine"],
         default="co",
         help="Metric for comparing motif score profiles (default: %(default)s)",
     )
-    continuous.add_argument(
-        "--c-filter",
-        choices=["score", "none"],
-        default="none",
-        help="Criterion for filtering comparison results (default: %(default)s)",
+    mimosa.add_argument(
+        "--comparison-criterion",
+        choices=["score", "p-value"],
+        default="score",
+        help="Criterion for filtering comparison results. CLI p-value uses MIMOSA adj.p-value (default: %(default)s)",
     )
-    continuous.add_argument(
-        "--c-threshold",
+    mimosa.add_argument(
+        "--comparison-threshold",
         type=float,
-        default=0.05,
-        help="Numerical threshold for the filtering criterion (default: %(default)s)",
+        default=None,
+        help="Numerical threshold for the comparison criterion. Defaults to 0.9 for score and 0.05 for p-value",
     )
-    continuous.add_argument(
-        "--c-search-range",
+    mimosa.add_argument(
+        "--mimosa-search-range",
         type=int,
         default=10,
         help="Range to search for optimal offset alignment (default: %(default)s)",
     )
-    continuous.add_argument(
-        "--c-jobs",
-        type=int,
-        default=-1,
-        help="Number of parallel jobs for comparisons. Set to -1 to use all available cores (default: %(default)s)",
+    mimosa.add_argument(
+        "--mimosa-null-distribution",
+        default=None,
+        help="Prepared MIMOSA null distribution path required for p-value filtering",
     )
 
     # ========== Other options ==========
     other = parser.add_argument_group("Other options")
+    other.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Shared worker/thread count. Use -1 for all available cores where supported (default: %(default)s)",
+    )
     other.add_argument(
         "--seed",
         type=int,
@@ -328,6 +327,30 @@ def create_arg_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _external_thread_count(jobs: int) -> int:
+    if jobs == -1:
+        return os.cpu_count() or 1
+    return jobs
+
+
+def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.jobs == 0 or args.jobs < -1:
+        parser.error("--jobs must be -1 or a positive integer")
+
+    if args.comparison_threshold is None:
+        args.comparison_threshold = default_threshold_for_criterion(
+            args.comparison_criterion
+        )
+
+    if args.comparison_criterion == "p-value" and args.comparator != "mimosa":
+        parser.error("--comparison-criterion p-value is only supported with -c mimosa")
+
+    if args.comparison_criterion == "p-value" and args.mimosa_null_distribution is None:
+        parser.error(
+            "--comparison-criterion p-value requires --mimosa-null-distribution"
+        )
 
 
 def _command_exists(command: str) -> bool:
@@ -430,6 +453,8 @@ def setup_discovery_tool(args) -> Any:
     ValueError
         If an unknown tool name is specified in the arguments
     """
+    thread_count = _external_thread_count(args.jobs)
+
     if args.tool == "streme":
         return StremeDiscoveryTool(nmotifs=args.nmotifs, command=args.streme_command)
     elif args.tool == "meme":
@@ -440,7 +465,7 @@ def setup_discovery_tool(args) -> Any:
             minsites=args.meme_minsites,
             maxsites=args.meme_maxsites,
             seed=args.meme_seed,
-            threads=args.meme_p,
+            threads=thread_count,
         )
     elif args.tool == "bamm":
         return BammDiscoveryTool(
@@ -451,7 +476,7 @@ def setup_discovery_tool(args) -> Any:
             jar_path=args.dimont_jar,
             java_command=args.java_command,
             java_xmx=args.java_xmx,
-            threads=args.jstacs_threads,
+            threads=thread_count,
             position_tag=args.jstacs_position_tag,
             value_tag=args.jstacs_value_tag,
             bg_order=args.jstacs_bg_order,
@@ -464,7 +489,7 @@ def setup_discovery_tool(args) -> Any:
             jar_path=args.slim_jar,
             java_command=args.java_command,
             java_xmx=args.java_xmx,
-            threads=args.jstacs_threads,
+            threads=thread_count,
             position_tag=args.jstacs_position_tag,
             value_tag=args.jstacs_value_tag,
             bg_order=args.jstacs_bg_order,
@@ -473,7 +498,7 @@ def setup_discovery_tool(args) -> Any:
             starts=args.slim_starts,
         )
     elif args.tool == "sitega":
-        return SitegaDiscoveryTool(nmotifs=args.nmotifs)
+        return SitegaDiscoveryTool(nmotifs=args.nmotifs, threads=thread_count)
     else:
         raise ValueError(f"Unknown tool: {args.tool}")
 
@@ -521,21 +546,24 @@ def setup_comparator(args) -> Any:
     if args.comparator == "tomtom":
         return TomtomComparator(
             metric=args.tomtom_metric,
-            n_jobs=args.tomtom_jobs,
+            n_jobs=args.jobs,
             seed=args.seed,
             pfm_mode=args.pfm_mode,
+            comparison_criterion=args.comparison_criterion,
+            comparison_threshold=args.comparison_threshold,
         )
 
-    elif args.comparator == "continuous":
-        filter_type = None if args.c_filter == "none" else args.c_filter
+    elif args.comparator == "mimosa":
         return UniversalMotifComparator(
-            name=f"{args.comparator}_comparator",
-            metric=args.c_metric,
-            n_jobs=args.c_jobs,
+            name="mimosa_comparator",
+            metric=args.mimosa_metric,
+            n_jobs=args.jobs,
             seed=args.seed,
-            filter_type=filter_type,
-            filter_threshold=args.c_threshold,
-            search_range=args.c_search_range,
+            comparison_criterion=args.comparison_criterion,
+            comparison_threshold=args.comparison_threshold,
+            search_range=args.mimosa_search_range,
+            pvalue=args.comparison_criterion == "p-value",
+            null_distribution=args.mimosa_null_distribution,
         )
 
     else:
@@ -614,6 +642,7 @@ def main_cli():
         sys.exit(1)
 
     args = parser.parse_args()
+    validate_args(parser, args)
 
     # Validate inputs
     if not os.path.exists(args.foreground):

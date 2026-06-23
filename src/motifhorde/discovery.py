@@ -626,9 +626,10 @@ class SlimDiscoveryTool(MotifDiscoveryTool):
 class SitegaDiscoveryTool(MotifDiscoveryTool):
     """Wrapper around SiteGA motif discovery."""
 
-    def __init__(self, nmotifs: int = 5) -> None:
+    def __init__(self, nmotifs: int = 5, threads: int | None = None) -> None:
         super().__init__(name="sitega")
         self.nmotifs = nmotifs
+        self.threads = threads
 
     def discover(
         self,
@@ -656,6 +657,7 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
             out_path=output_dir + os.sep,
             max_peak_len=5000,
             log_file="sitega.log",
+            num_threads=self.threads or 0,
         )
         if rc != 0:
             raise RuntimeError(f"SiteGA training failed with return code {rc}")
