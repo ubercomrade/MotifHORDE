@@ -406,9 +406,6 @@ def check_dependencies(args) -> None:
             )
         except FileNotFoundError as exc:
             _dependency_error(str(exc))
-    elif args.tool == "sitega":
-        if shutil.which("andy05cell.exe") is None:
-            _dependency_error("SiteGA executable missing: andy05cell.exe")
 
 
 def setup_discovery_tool(args) -> Any:

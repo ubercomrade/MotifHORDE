@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from motifhorde.cli import create_arg_parser, setup_discovery_params, setup_discovery_tool
+from motifhorde.cli import (
+    check_dependencies,
+    create_arg_parser,
+    setup_discovery_params,
+    setup_discovery_tool,
+)
 from motifhorde.discovery import (
     BammDiscoveryTool,
     DimontDiscoveryTool,
@@ -15,13 +20,23 @@ from motifhorde.discovery import (
 
 def _parse(tool: str, *extra: str):
     parser = create_arg_parser()
-    return parser.parse_args(["fg.fa", "bg.fa", "prom.fa", "out", "-t", tool, *extra])
+    return parser.parse_args(
+        ["fg.fa", "bg.fa", "prom.fa", "out", "-t", tool, *extra]
+    )
 
 
 def test_cli_help_includes_new_tools_and_options():
     help_text = create_arg_parser().format_help()
 
-    for text in ["meme", "dimont", "slim", "--meme-command", "--dimont-jar", "--slim-jar", "--java-xmx"]:
+    for text in [
+        "meme",
+        "dimont",
+        "slim",
+        "--meme-command",
+        "--dimont-jar",
+        "--slim-jar",
+        "--java-xmx",
+    ]:
         assert text in help_text
 
 
@@ -48,3 +63,12 @@ def test_setup_discovery_params_keeps_tool_specific_values():
     assert bamm == {"length": [8], "order": [1, 2]}
     assert sitega == {"length": [8], "lpd": [10]}
     assert meme == {"length": [8]}
+
+
+def test_sitega_dependency_check_does_not_require_executable(monkeypatch):
+    def fail_which(command: str) -> str | None:
+        raise AssertionError(f"unexpected PATH lookup for {command}")
+
+    monkeypatch.setattr("motifhorde.cli.shutil.which", fail_which)
+
+    check_dependencies(_parse("sitega"))

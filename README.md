@@ -125,7 +125,7 @@ Legacy motif classes and ragged payloads are not used in production code.
 
 ## Discovery Tools
 
-The CLI can run the following external discovery tools:
+The CLI can run the following discovery tools:
 
 | CLI value | Model family | Main parameter grid |
 | :--- | :--- | :--- |
@@ -232,7 +232,10 @@ External dependency notes:
 - `bamm` requires `BaMMmotif` and uses STREME for PWM initialization.
 - `dimont` and `slim` require Java; `Dimont.jar` and `SlimDimont.jar` are
   bundled in the Python package.
-- `sitega` requires `andy05cell.exe` to be available through `PATH`.
+- `sitega` is built as a pybind11 extension module during package
+  installation. It requires a C++17 compiler and uses `pybind11` as a build
+  dependency. OpenMP is enabled when supported by the platform/compiler; serial
+  non-OpenMP builds are supported but may be slower.
 
 Executable and JAR paths can be overridden by CLI flags or environment variables:
 
@@ -243,6 +246,12 @@ Executable and JAR paths can be overridden by CLI flags or environment variables
 | BaMMmotif | `--bamm-command` | `HORDEMOTIFS_BAMM_COMMAND` |
 | Dimont JAR | `--dimont-jar` | `HORDEMOTIFS_DIMONT_JAR` |
 | SlimDimont JAR | `--slim-jar` | `HORDEMOTIFS_SLIM_JAR` |
+
+After installation, the SiteGA extension can be checked with:
+
+```bash
+uv run python -c "import sitega; print(sitega.__doc__)"
+```
 
 ## CLI Usage
 

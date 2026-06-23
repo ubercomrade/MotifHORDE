@@ -6,13 +6,11 @@ import glob
 import logging
 import os
 import re
-import shutil
 from abc import ABC, abstractmethod
 from typing import List
 
 from mimosa import GenericModel, read_model
 
-from .execute import run_sitega
 from .external import (
     DEFAULT_BAMM_COMMAND,
     DEFAULT_DIMONT_JAR,
@@ -644,14 +642,30 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         length = _require_length(kwargs)
         number_of_lpd = int(kwargs.get("lpd", 20))
         os.makedirs(output_dir, exist_ok=True)
-        shutil.copyfile(foreground, os.path.join(output_dir, "train.fa"))
-        shutil.copyfile(background, os.path.join(output_dir, "background.fa"))
-        run_sitega(output_dir, length, number_of_lpd, number_of_motifs)
+
+        import sitega
+
+        rc, mat_path, *_ = sitega.train(
+            fg_path=foreground,
+            bg_path=background,
+            max_lpd=6,
+            motif_len=length,
+            size=number_of_lpd,
+            olig_bg=6,
+            infc=1,
+            out_path=output_dir + os.sep,
+            max_peak_len=5000,
+            log_file="sitega.log",
+        )
+        if rc != 0:
+            raise RuntimeError(f"SiteGA training failed with return code {rc}")
+
+        paths = [mat_path] if mat_path else []
+        if not paths:
+            paths = sorted(glob.glob(os.path.join(output_dir, "train.fa_mat*")))
 
         motifs: List[GenericModel] = []
-        for index, path in enumerate(
-            sorted(glob.glob(os.path.join(output_dir, "train.fa_mat*"))), start=1
-        ):
+        for index, path in enumerate(paths[:number_of_motifs], start=1):
             motif = read_model(path, "sitega")
             motif.name = f"Sitega-{index}"
             if _has_expected_length(motif, length):

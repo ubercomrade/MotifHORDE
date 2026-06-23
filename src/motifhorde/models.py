@@ -21,8 +21,8 @@ from mimosa.models import (
 from mimosa.scanning import (
     StrandMode,
     calculate_threshold_table,
-    get_score_bounds,
     scan_model_strands,
+    score_bounds_from_model as get_score_bounds,
 )
 
 __all__ = [
