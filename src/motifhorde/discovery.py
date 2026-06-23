@@ -224,6 +224,29 @@ def _read_xml_models(
     return motifs
 
 
+def _normalize_sitega_mat_path(path: str) -> str:
+    if os.path.splitext(path)[1].lower() == ".mat":
+        return path
+
+    mat_path = f"{path}.mat"
+    if os.path.exists(mat_path):
+        return mat_path
+
+    os.replace(path, mat_path)
+    return mat_path
+
+
+def _sitega_output_paths(output_dir: str, mat_path: str) -> list[str]:
+    paths = [mat_path] if mat_path and os.path.exists(mat_path) else []
+    if not paths:
+        for pattern in ["train_mat*", "train.fa_mat*", "*.mat"]:
+            paths = sorted(glob.glob(os.path.join(output_dir, pattern)))
+            if paths:
+                break
+
+    return [_normalize_sitega_mat_path(path) for path in paths]
+
+
 class StremeDiscoveryTool(MotifDiscoveryTool):
     """Wrapper around STREME PWM discovery."""
 
@@ -662,9 +685,7 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         if rc != 0:
             raise RuntimeError(f"SiteGA training failed with return code {rc}")
 
-        paths = [mat_path] if mat_path else []
-        if not paths:
-            paths = sorted(glob.glob(os.path.join(output_dir, "train.fa_mat*")))
+        paths = _sitega_output_paths(output_dir, mat_path)
 
         motifs: List[GenericModel] = []
         for index, path in enumerate(paths[:number_of_motifs], start=1):

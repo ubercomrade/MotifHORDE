@@ -76,6 +76,38 @@ def test_sitega_discovery_uses_returned_mat_path(monkeypatch, tmp_path):
     assert not (output_dir / "train.fa").exists()
 
 
+def test_sitega_discovery_normalizes_returned_path_without_extension(
+    monkeypatch, tmp_path
+):
+    foreground = tmp_path / "foreground.fa"
+    background = tmp_path / "background.fa"
+    output_dir = tmp_path / "sitega-output"
+    returned_mat = tmp_path / "returned"
+
+    _write_fasta(foreground)
+    _write_fasta(background)
+
+    def train(**kwargs):
+        output_dir.mkdir(exist_ok=True)
+        _write_sitega_mat(returned_mat, length=4)
+        return 0, os.fspath(returned_mat), "", 0.25
+
+    monkeypatch.setitem(sys.modules, "sitega", SimpleNamespace(train=train))
+
+    motifs = SitegaDiscoveryTool().discover(
+        os.fspath(foreground),
+        os.fspath(background),
+        os.fspath(output_dir),
+        number_of_motifs=1,
+        length=4,
+        lpd=10,
+    )
+
+    assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 4)]
+    assert not returned_mat.exists()
+    assert returned_mat.with_suffix(".mat").exists()
+
+
 def test_sitega_discovery_passes_thread_count(monkeypatch, tmp_path):
     foreground = tmp_path / "foreground.fa"
     background = tmp_path / "background.fa"
@@ -110,7 +142,7 @@ def test_sitega_discovery_falls_back_to_glob_for_empty_mat_path(monkeypatch, tmp
     foreground = tmp_path / "foreground.fa"
     background = tmp_path / "background.fa"
     output_dir = tmp_path / "sitega-output"
-    fallback_mat = output_dir / "train.fa_mat0.mat"
+    fallback_mat = output_dir / "train_mat1"
 
     _write_fasta(foreground)
     _write_fasta(background)
@@ -132,6 +164,8 @@ def test_sitega_discovery_falls_back_to_glob_for_empty_mat_path(monkeypatch, tmp
     )
 
     assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 4)]
+    assert not fallback_mat.exists()
+    assert fallback_mat.with_suffix(".mat").exists()
 
 
 def test_sitega_discovery_rejects_failed_training(monkeypatch, tmp_path):
