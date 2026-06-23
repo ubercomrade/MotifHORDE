@@ -55,7 +55,7 @@ wheels = [
 
 [[package]]
 name = "mimosa-tool"
-version = "1.3.0"
+version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "joblib" },
@@ -65,9 +65,9 @@ dependencies = [
     { name = "scipy" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d6/a7/3f94415e4e250ed4b22cb48a7cbc589c66908a87fbd9d3698141f4445bc9/mimosa_tool-1.3.0.tar.gz", hash = "sha256:dfd021b35f8d6119af0179c194d99e7c3fd555d0d496a4e24d8c742e4fd66b79", size = 985634, upload-time = "2026-06-22T03:54:40.606Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/1f/26d4aa50f6c17894bf8ad3b5f6b91596cd7a4b46b147d1dc34c88436d5f6/mimosa_tool-1.3.1.tar.gz", hash = "sha256:21092c34bf9813d5f05eb41fbd4e010771829a61d82115a8b731907c323d63ef", size = 985650, upload-time = "2026-06-23T05:16:56.467Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/69/6e/6f10886fa7040092bd3e82ae6c637f6fdd631e6a4d466c418138e7616577/mimosa_tool-1.3.0-py3-none-any.whl", hash = "sha256:0a5662f27414426cabb416fb0cb732c2fe725e46824fa8bdcecbca261698e471", size = 83185, upload-time = "2026-06-22T03:54:39.47Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/31/4695dfc7b5e0248b51a92e10179233cd05fb112639564bbfc2c6a44a79e7/mimosa_tool-1.3.1-py3-none-any.whl", hash = "sha256:1c5fcbb7af57ed5b984de11957177c8e289832820f517b73cd30d858774b4f7b", size = 83186, upload-time = "2026-06-23T05:16:55.188Z" },
 ]
 
 [[package]]
@@ -92,7 +92,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "joblib", specifier = ">=1.5.3" },
-    { name = "mimosa-tool", specifier = ">=1.3.0,<2" },
+    { name = "mimosa-tool", specifier = ">=1.3.1,<2" },
     { name = "numba", specifier = ">=0.65.0" },
     { name = "numpy", specifier = ">=2.0,<2.4" },
     { name = "pandas", specifier = ">=2.2.3" },
