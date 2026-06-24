@@ -185,10 +185,11 @@ Use `--mimosa-metric` to select the profile metric. Use
 `adj.p-value`. P-value mode requires a prepared null distribution passed with
 `--mimosa-null-distribution`.
 
-`--jobs` is the single parallelism option for comparison and supported
-discovery tools. `--jobs 1` is single-threaded, positive values request that
-exact count where supported, and `--jobs -1` uses all available cores where the
-underlying tool supports automatic or resolved all-core execution.
+`--jobs` is the single compute-budget option. During bootstrap, independent
+discovery runs use up to this many Python processes while each discovery tool is
+configured for one internal thread. After bootstrap, supported comparators use
+the same `--jobs` value for their internal parallelism. Use `--jobs -1` to use
+all available cores for bootstrap workers and comparators that support it.
 
 ## Evaluation
 
@@ -241,8 +242,8 @@ External dependency notes:
   bundled in the Python package.
 - `sitega` is built as a pybind11 extension module during package
   installation. It requires a C++17 compiler and uses `pybind11` as a build
-  dependency. OpenMP is enabled when supported by the platform/compiler; serial
-  non-OpenMP builds are supported but may be slower.
+  dependency. The current SiteGA training loop runs serially because it mutates
+  shared population state that is not safe to update from OpenMP threads.
 
 Executable and JAR paths can be overridden by CLI flags or environment variables:
 
@@ -313,6 +314,18 @@ motifhorde peaks.fa background.fa promoters.fa output/ \
   --comparison-criterion p-value \
   --mimosa-null-distribution profile-null.joblib \
   --jobs -1
+
+# SiteGA bootstrap parallelism with deterministic per-task seeds
+motifhorde peaks.fa background.fa promoters.fa output/ \
+  -t sitega \
+  -n 10 \
+  --lpd 10-40-10 \
+  -l 10-16-2 \
+  -m auROC \
+  -c mimosa \
+  --mimosa-metric dice \
+  --jobs 6 \
+  --seed 42
 
 # Jstacs tools with explicit Java settings
 motifhorde peaks.fa background.fa promoters.fa output/ \

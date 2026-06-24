@@ -38,12 +38,16 @@ class DeNovoPipeline:
         comparator: UniversalMotifComparator,
         fpr_threshold: float = 0.001,
         number_of_motifs: int = 5,
+        jobs: int = 1,
+        seed: int | None = None,
     ) -> None:
         self.discovery_tool = discovery_tool
         self.evaluator = evaluator
         self.comparator = comparator
         self.fpr_threshold = fpr_threshold
         self.number_of_motifs = number_of_motifs
+        self.jobs = jobs
+        self.seed = seed
 
     def run(
         self,
@@ -137,7 +141,13 @@ class DeNovoPipeline:
         discovery_params: Dict[str, Iterable[Any]],
         output_dir: str,
     ):
-        bootstrapper = Bootstrapper(self.discovery_tool, self.evaluator, output_dir)
+        bootstrapper = Bootstrapper(
+            self.discovery_tool,
+            self.evaluator,
+            output_dir,
+            jobs=self.jobs,
+            seed=self.seed,
+        )
         return bootstrapper.run(
             peaks,
             background,

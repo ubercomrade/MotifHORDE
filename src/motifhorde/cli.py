@@ -314,7 +314,13 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--jobs",
         type=int,
         default=1,
-        help="Shared worker/thread count. Use -1 for all available cores where supported (default: %(default)s)",
+        help=(
+            "Shared worker count. During bootstrap, independent discovery runs "
+            "use this many processes and discovery tools run single-threaded "
+            "inside each process. During comparison, supported comparators use "
+            "this many internal jobs. Use -1 for all available cores "
+            "(default: %(default)s)"
+        ),
     )
     other.add_argument(
         "--seed",
@@ -329,7 +335,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _external_thread_count(jobs: int) -> int:
+def _resolve_jobs(jobs: int) -> int:
     if jobs == -1:
         return os.cpu_count() or 1
     return jobs
@@ -453,7 +459,7 @@ def setup_discovery_tool(args) -> Any:
     ValueError
         If an unknown tool name is specified in the arguments
     """
-    thread_count = _external_thread_count(args.jobs)
+    discovery_threads = 1
 
     if args.tool == "streme":
         return StremeDiscoveryTool(nmotifs=args.nmotifs, command=args.streme_command)
@@ -465,7 +471,7 @@ def setup_discovery_tool(args) -> Any:
             minsites=args.meme_minsites,
             maxsites=args.meme_maxsites,
             seed=args.meme_seed,
-            threads=thread_count,
+            threads=discovery_threads,
         )
     elif args.tool == "bamm":
         return BammDiscoveryTool(
@@ -476,7 +482,7 @@ def setup_discovery_tool(args) -> Any:
             jar_path=args.dimont_jar,
             java_command=args.java_command,
             java_xmx=args.java_xmx,
-            threads=thread_count,
+            threads=discovery_threads,
             position_tag=args.jstacs_position_tag,
             value_tag=args.jstacs_value_tag,
             bg_order=args.jstacs_bg_order,
@@ -489,7 +495,7 @@ def setup_discovery_tool(args) -> Any:
             jar_path=args.slim_jar,
             java_command=args.java_command,
             java_xmx=args.java_xmx,
-            threads=thread_count,
+            threads=discovery_threads,
             position_tag=args.jstacs_position_tag,
             value_tag=args.jstacs_value_tag,
             bg_order=args.jstacs_bg_order,
@@ -498,7 +504,11 @@ def setup_discovery_tool(args) -> Any:
             starts=args.slim_starts,
         )
     elif args.tool == "sitega":
-        return SitegaDiscoveryTool(nmotifs=args.nmotifs, threads=thread_count)
+        return SitegaDiscoveryTool(
+            nmotifs=args.nmotifs,
+            threads=discovery_threads,
+            seed=args.seed,
+        )
     else:
         raise ValueError(f"Unknown tool: {args.tool}")
 
@@ -665,6 +675,7 @@ def main_cli():
 
     # Setup pipeline components
     if args.verbose:
+        resolved_jobs = _resolve_jobs(args.jobs)
         print("=" * 60)
         print("MotifHORDE De Novo Pipeline")
         print("=" * 60)
@@ -672,6 +683,10 @@ def main_cli():
         print(f"Comparator: {args.comparator}")
         print(f"Metric: {args.metric}")
         print(f"FPR threshold: {args.fpr}")
+        print(f"Jobs: {args.jobs}")
+        print(f"Bootstrap discovery workers: {resolved_jobs}")
+        print("Discovery tool internal threads during bootstrap: 1")
+        print(f"Comparator jobs: {args.jobs}")
         print("=" * 60)
 
     discovery_tool = setup_discovery_tool(args)
@@ -686,6 +701,8 @@ def main_cli():
         comparator=comparator,
         fpr_threshold=args.fpr,
         number_of_motifs=args.nmotifs,
+        jobs=_resolve_jobs(args.jobs),
+        seed=args.seed,
     )
 
     pipeline.run(

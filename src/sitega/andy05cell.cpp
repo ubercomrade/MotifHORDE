@@ -3063,15 +3063,11 @@ int sitega_train(const TrainParams* p, TrainResult* r)
 		for (i = 0; i < mege_h; i++)success_mi[i] = try_mi[i] = 0;
 		double sm0_rate = 0.001;
 		int mut_jump = 0;
-		// Stage 6: per-thread town pool for OpenMP parallel mutation loop
-		#ifdef _OPENMP
-		int nthreads = omp_get_max_threads();
-		#else
 		int nthreads = 1;
-		#endif
+		// The mutation loop reads and mutates the shared population. Running it
+		// with OpenMP corrupts that state and can crash during final cleanup.
 		town* mpool = new town[nthreads];
 		for (int t = 0; t < nthreads; t++) mpool[t].mem_in(nseq);
-		// Per-thread accumulators (avoid omp critical/atomic)
 		int (*atry_l)[NMUT] = new int[nthreads][NMUT];
 		int (*asuccess_l)[NMUT] = new int[nthreads][NMUT];
 		int* success_o_l = new int[nthreads];
@@ -3090,18 +3086,11 @@ int sitega_train(const TrainParams* p, TrainResult* r)
 			step_max_tot += step_max;
 			for (i = 0; i < mege_h; i++)pop[i].sm = pop[i].tm = 0;
 			if (gen == 0 && verbose)fprintf(outlog, "Mut cycle %d\n", step_max_tot / step_max);
-			// Stage 6: parallel mutation loop — individuals are independent
-			#pragma omp parallel for schedule(dynamic)
 			for (i = 0; i < mege_h; i++)
 			{
 				if (stop_pi[i] == 0 || (stop_li[i] == 0 || stop_oi[i] == 0))
 				{
-					// Stage 6: per-thread temporary town instead of global det1
-					#ifdef _OPENMP
-					int tid = omp_get_thread_num();
-					#else
 					int tid = 0;
-					#endif
 					town &det1 = mpool[tid];													
 					int success_o_local = 0, success_l_local = 0, success_p_local = 0;
 					int success_m_local = 0;
@@ -3257,7 +3246,6 @@ int sitega_train(const TrainParams* p, TrainResult* r)
 					success_m_tot_l[tid] += success_m_local;
 				//	if ((gen == 0 && i == 0) || gen > 0)
 					if (verbose)
-					#pragma omp critical
 					{
 						fprintf(outlog, "M %d %d,%d,%d = %d Try %d M %f H %g F %f", i + 1, success_o_local, success_l_local, success_p_local, success_m_local, n_mut_here, pop[i].mah, pop[i].fpr, pop[i].fit);
 						fprintf(outlog, "\n");
@@ -3343,7 +3331,6 @@ int sitega_train(const TrainParams* p, TrainResult* r)
 				}
 			}
 		} while (mdo == 1);
-		// Stage 6: cleanup per-thread town pool
 		for (int t = 0; t < nthreads; t++) mpool[t].mem_out();
 		delete[] mpool;
 		delete[] atry_l;
@@ -3820,4 +3807,3 @@ int main(int argc, char* argv[])
 	}
 	return rc;
 }
-

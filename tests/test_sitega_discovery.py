@@ -70,6 +70,7 @@ def test_sitega_discovery_uses_returned_mat_path(monkeypatch, tmp_path):
             "max_peak_len": 5000,
             "log_file": "sitega.log",
             "num_threads": 0,
+            "seed": 0,
         }
     ]
     assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 4)]
@@ -136,6 +137,67 @@ def test_sitega_discovery_passes_thread_count(monkeypatch, tmp_path):
     )
 
     assert calls[0]["num_threads"] == 3
+
+
+def test_sitega_discovery_passes_constructor_seed(monkeypatch, tmp_path):
+    foreground = tmp_path / "foreground.fa"
+    background = tmp_path / "background.fa"
+    output_dir = tmp_path / "sitega-output"
+    returned_mat = tmp_path / "returned.mat"
+    calls = []
+
+    _write_fasta(foreground)
+    _write_fasta(background)
+
+    def train(**kwargs):
+        calls.append(kwargs)
+        output_dir.mkdir(exist_ok=True)
+        _write_sitega_mat(returned_mat, length=4)
+        return 0, os.fspath(returned_mat), "", 0.25
+
+    monkeypatch.setitem(sys.modules, "sitega", SimpleNamespace(train=train))
+
+    SitegaDiscoveryTool(seed=123).discover(
+        os.fspath(foreground),
+        os.fspath(background),
+        os.fspath(output_dir),
+        number_of_motifs=1,
+        length=4,
+        lpd=10,
+    )
+
+    assert calls[0]["seed"] == 123
+
+
+def test_sitega_discovery_kwargs_seed_overrides_constructor_seed(monkeypatch, tmp_path):
+    foreground = tmp_path / "foreground.fa"
+    background = tmp_path / "background.fa"
+    output_dir = tmp_path / "sitega-output"
+    returned_mat = tmp_path / "returned.mat"
+    calls = []
+
+    _write_fasta(foreground)
+    _write_fasta(background)
+
+    def train(**kwargs):
+        calls.append(kwargs)
+        output_dir.mkdir(exist_ok=True)
+        _write_sitega_mat(returned_mat, length=4)
+        return 0, os.fspath(returned_mat), "", 0.25
+
+    monkeypatch.setitem(sys.modules, "sitega", SimpleNamespace(train=train))
+
+    SitegaDiscoveryTool(seed=123).discover(
+        os.fspath(foreground),
+        os.fspath(background),
+        os.fspath(output_dir),
+        number_of_motifs=1,
+        length=4,
+        lpd=10,
+        seed=456,
+    )
+
+    assert calls[0]["seed"] == 456
 
 
 def test_sitega_discovery_falls_back_to_glob_for_empty_mat_path(monkeypatch, tmp_path):

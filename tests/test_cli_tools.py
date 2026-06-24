@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from motifhorde.cli import (
+    _resolve_jobs,
     check_dependencies,
     create_arg_parser,
     setup_comparator,
@@ -30,7 +31,8 @@ def _parse(tool: str, *extra: str, validate: bool = True):
 
 
 def test_cli_help_includes_new_tools_and_options():
-    help_text = create_arg_parser().format_help()
+    parser = create_arg_parser()
+    help_text = parser.format_help()
 
     for text in [
         "meme",
@@ -46,6 +48,11 @@ def test_cli_help_includes_new_tools_and_options():
         "--jobs",
     ]:
         assert text in help_text
+    jobs_actions = [
+        action for action in parser._actions if "--jobs" in action.option_strings
+    ]
+    assert len(jobs_actions) == 1
+    assert "--bootstrap-jobs" not in help_text
 
 
 def test_cli_help_excludes_removed_options():
@@ -101,6 +108,21 @@ def test_jobs_validation_rejects_non_positive_values(jobs):
         validate_args(parser, args)
 
 
+@pytest.mark.parametrize("jobs", ["1", "3", "-1"])
+def test_jobs_validation_accepts_positive_and_auto_values(jobs):
+    parser = create_arg_parser()
+    args = parser.parse_args(["fg.fa", "bg.fa", "prom.fa", "out", "--jobs", jobs])
+
+    validate_args(parser, args)
+
+
+def test_resolve_jobs_uses_available_cpu_count(monkeypatch):
+    monkeypatch.setattr("motifhorde.cli.os.cpu_count", lambda: 7)
+
+    assert _resolve_jobs(-1) == 7
+    assert _resolve_jobs(3) == 3
+
+
 @pytest.mark.parametrize(
     ("tool", "expected_type"),
     [
@@ -125,19 +147,19 @@ def test_setup_discovery_tool_returns_selected_tool(tool, expected_type):
         ("sitega", "threads"),
     ],
 )
-def test_setup_discovery_tool_propagates_jobs(tool, expected_attr):
+def test_setup_discovery_tool_uses_single_internal_thread(tool, expected_attr):
     discovery_tool = setup_discovery_tool(_parse(tool, "--jobs", "3"))
 
-    assert getattr(discovery_tool, expected_attr) == 3
+    assert getattr(discovery_tool, expected_attr) == 1
 
 
 @pytest.mark.parametrize("tool", ["meme", "dimont", "slim", "sitega"])
-def test_setup_discovery_tool_resolves_auto_jobs_for_external_tools(monkeypatch, tool):
+def test_setup_discovery_tool_does_not_multiply_auto_jobs(monkeypatch, tool):
     monkeypatch.setattr("motifhorde.cli.os.cpu_count", lambda: 7)
 
     discovery_tool = setup_discovery_tool(_parse(tool, "--jobs", "-1"))
 
-    assert discovery_tool.threads == 7
+    assert discovery_tool.threads == 1
 
 
 def test_setup_comparator_configures_tomtom_jobs():

@@ -1,589 +1,803 @@
-# CLI comparator and parallelism update plan
+# Plan: bootstrap parallelism through the existing `--jobs`
 
 ## Goal
 
-Replace the old `continuous` comparator CLI with an explicit MIMOSA comparator
-interface and make parallelism controlled by one shared CLI option.
+Speed up SiteGA-heavy runs without adding another jobs option and without
+reintroducing unsafe OpenMP mutation inside the SiteGA C++ core.
 
-Backward compatibility is not required. Do not keep deprecated aliases for:
+Target example:
 
-- `-c continuous`;
-- `--c-metric`;
-- `--c-filter`;
-- `--c-threshold`;
-- `--c-search-range`;
-- `--c-jobs`;
-- `--tomtom-jobs`;
-- `--meme-p`;
-- `--jstacs-threads`.
-
-The final interface should be smaller, explicit, and consistent across
-discovery, comparison, and external tool execution.
-
-## Current problems
-
-### Comparator naming
-
-The CLI exposes:
-
-```text
--c, --comparator {tomtom,continuous}
+```bash
+motifhorde peaks.fa background.fa promoters.fa output \
+  --tool sitega \
+  -n 10 \
+  --lpd 10-40-10 \
+  -l 10-16-2 \
+  -m auROC \
+  -c mimosa \
+  --mimosa-metric dice \
+  --jobs 6 \
+  -v
 ```
 
-The `continuous` name is stale. The implementation is already backed by
-`mimosa.comparison`, and the user-facing comparator should be named `mimosa`.
-
-### Comparison filtering
-
-The current continuous comparator options expose:
+For this grid the bootstrap stage currently runs at least:
 
 ```text
---c-filter {score,none}
---c-threshold FLOAT
+4 motif lengths * 4 lpd values * 2 odd/even splits = 32 discovery runs
 ```
 
-This is too vague for the desired behavior. The comparison criterion should be
-one of:
+Those discovery runs are independent. They are a safer and simpler
+parallelization boundary than the shared-population mutation loop inside
+SiteGA.
 
-- `score`;
-- `p-value`.
+## User-facing decision
 
-In the CLI, `p-value` means adjusted p-value. In MIMOSA result payloads the
-public dataframe column is `adj.p-value`, not `p-value`.
+Do not add `--bootstrap-jobs`.
 
-### P-value configuration
+Use the existing `--jobs` as the single parallelism budget:
 
-MIMOSA p-values require a prepared null distribution. The CLI currently has no
-way to provide that distribution to the pipeline comparator.
+- during bootstrap, `--jobs N` means up to `N` independent discovery runs in
+  separate Python processes;
+- discovery tools must not use their own multithreading while bootstrap process
+  parallelism is active;
+- after bootstrap, motif comparison uses the same `--jobs N`;
+- MIMOSA should use its existing internal `n_jobs` support;
+- Tomtom should not get a new parallelism mechanism.
 
-The existing `UniversalMotifComparator` constructor already accepts:
+This keeps the CLI small and avoids asking users to reason about multiple job
+counts.
 
-- `pvalue`;
-- `null_distribution`;
-- `null_search_dirs`;
-- `effective_number_of_targets`.
+## Current state
 
-However, the wrapper currently calls low-level `mimosa.comparison` functions.
-Those low-level functions return score-only `ComparisonResult` records. The
-p-value annotation logic is applied at the higher-level MIMOSA API boundary.
+- `Bootstrapper.run()` in `src/motifhorde/evaluation.py` iterates over the
+  parameter grid and odd/even splits sequentially.
+- `setup_discovery_tool()` currently passes `_external_thread_count(args.jobs)`
+  into tools that support thread options.
+- `setup_comparator()` currently passes `args.jobs` into MIMOSA/Tomtom
+  comparator configuration.
+- SiteGA training is now serial inside the C++ core because the previous OpenMP
+  mutation loop read and mutated shared `pop[]` state and could corrupt memory.
+- SiteGA still accepts `num_threads`, but the current safe C++ path does not use
+  OpenMP for training work.
+- SiteGA uses `time(NULL)` as the default seed when no seed is passed. Parallel
+  process launches can start in the same second, so explicit per-task seeds are
+  required for reproducible and diverse SiteGA bootstrap runs.
 
-### Parallelism
+## Target behavior
 
-Parallelism is currently split across multiple options:
+- `--jobs 1` preserves current sequential bootstrap behavior.
+- `--jobs N`, where `N > 1`, runs independent bootstrap discovery tasks in a
+  `ProcessPoolExecutor(max_workers=N)`.
+- `--jobs -1` resolves to `os.cpu_count() or 1` and uses that value for
+  bootstrap process workers and comparator jobs.
+- Discovery tools run with one internal thread during bootstrap. This prevents
+  `N` bootstrap workers from each starting `N` tool threads.
+- MIMOSA comparison runs after bootstrap and keeps using its existing internal
+  `n_jobs=args.jobs` path.
+- Tomtom comparison is left unchanged. No new Tomtom-level process pool or
+  extra parallelism should be added.
+- Output ordering remains deterministic by sorting bootstrap results by task
+  index.
+- Default command behavior remains understandable: one option, one compute
+  budget.
 
-- `--tomtom-jobs` for TomTom-like motif comparison;
-- `--c-jobs` for continuous profile comparison;
-- `--meme-p` for MEME;
-- `--jstacs-threads` for Dimont and SlimDimont.
+## Non-goals for the first patch
 
-SiteGA has a `num_threads` binding parameter, but the CLI does not pass a thread
-count into `SitegaDiscoveryTool`.
+- Do not restore OpenMP inside SiteGA mutation.
+- Do not rewrite the SiteGA genetic algorithm.
+- Do not add `--bootstrap-jobs`, `--discovery-jobs`, or any other jobs option.
+- Do not add a separate MIMOSA parallelism layer.
+- Do not add a separate Tomtom parallelism layer.
+- Do not parallelize final motif selection in the same patch.
+- Do not introduce a generic executor framework or service layer.
 
-This creates inconsistent behavior and makes it unclear which option controls
-which work.
+## CLI changes
 
-## Target CLI
-
-### Comparator selection
-
-Replace comparator choices with:
-
-```text
--c, --comparator {tomtom,mimosa}
-```
-
-Default remains:
-
-```text
-tomtom
-```
-
-### Shared parallelism
-
-Add one shared option, preferably in `Other options`:
+Keep the existing `--jobs` option and validation:
 
 ```text
 --jobs INT
 ```
 
-Suggested default:
+Semantics after this change:
+
+- `1`: sequential bootstrap and comparator/internal jobs of 1;
+- positive integer: bootstrap process worker count and comparator job count;
+- `-1`: resolve to all available CPUs for bootstrap worker count. Comparator
+  setup should keep its current handling of `args.jobs` unless a specific
+  comparator already resolves `-1` internally.
+
+Do not add another public argument.
+
+Update help text to make the dual-stage behavior explicit:
 
 ```text
-1
+Shared worker count. During bootstrap, independent discovery runs use this many
+processes and discovery tools run single-threaded inside each process. During
+comparison, supported comparators use this many internal jobs. Use -1 for all
+available cores.
 ```
 
-Semantics:
-
-- `1` means sequential or single-threaded execution where supported;
-- positive values mean that exact number of workers or threads where supported;
-- `-1` means automatic all-core behavior.
-
-Implementation detail:
-
-- pass `args.jobs` directly to MIMOSA comparators, because MIMOSA normalizes
-  `-1` to its automatic mode;
-- for external tools that need a positive thread count, resolve `-1` to
-  `os.cpu_count() or 1`;
-- pass `None` only to APIs where omitting the thread option is intentional.
-
-Add a small helper in `cli.py`:
+Keep validation simple:
 
 ```python
-def _external_thread_count(jobs: int) -> int:
+if args.jobs == 0 or args.jobs < -1:
+    parser.error("--jobs must be -1 or a positive integer")
+```
+
+Keep a single resolver:
+
+```python
+def _resolve_jobs(jobs: int) -> int:
     if jobs == -1:
         return os.cpu_count() or 1
     return jobs
 ```
 
-Validate `--jobs` once after parsing:
+Use the resolved value for bootstrap worker processes. Keep comparator setup on
+the existing code path so Tomtom behavior does not change.
 
-- valid values are `-1` and positive integers;
-- reject `0` and values below `-1` with `parser.error(...)`.
-
-### TomTom comparator options
-
-Keep:
+Verbose output should include:
 
 ```text
---tomtom-metric {pcc,ed}
---pfm-mode
+Jobs: 6
+Bootstrap discovery workers: 6
+Discovery tool internal threads during bootstrap: 1
+Comparator jobs: 6
 ```
 
-Remove:
+The exact wording can be shorter, but it should make the policy visible.
 
-```text
---tomtom-jobs
-```
+## Parallelism policy
 
-`TomtomComparator` should receive:
+Use `--jobs` as a global compute budget, not as a multiplier.
+
+### Bootstrap discovery
+
+- Use process-level parallelism.
+- Worker count is the resolved `--jobs` value.
+- Inside each bootstrap worker, discovery tools must use a single internal
+  thread or no explicit thread option.
+- This applies to tools with internal parallelism support: MEME, DiMotif,
+  SlimDimont, SiteGA, and any future discovery tool that exposes thread count.
+
+### Motif comparison
+
+- Comparison happens after bootstrap.
+- It can use the same resolved `--jobs` value because bootstrap workers are no
+  longer running.
+- MIMOSA should use its existing internal `n_jobs` implementation.
+- Tomtom should remain as currently implemented. Do not add a new process pool
+  around Tomtom.
+
+### Final discovery
+
+- Keep final discovery sequential in the first patch.
+- Use discovery tools with one internal thread for consistency with the new
+  discovery policy unless there is a strong reason to preserve internal threads
+  for final discovery.
+- If final discovery becomes a bottleneck later, handle it as a separate phase.
+
+## Discovery tool construction
+
+The current `setup_discovery_tool(args)` creates tools with
+`threads=_external_thread_count(args.jobs)` for tools that support threads.
+That must change to avoid oversubscription.
+
+Target behavior:
+
+- `setup_discovery_tool(args)` should configure discovery tools with internal
+  thread count `1` or `None`, depending on each tool's existing API.
+- The resolved `jobs` value should be passed to the pipeline/bootstrap layer,
+  not into discovery tool internals.
+- `setup_comparator(args)` should keep its existing behavior. In particular,
+  MIMOSA should use its internal `n_jobs` path, and Tomtom should not receive a
+  new wrapper-level parallelism mechanism.
+
+Recommended implementation:
 
 ```python
-n_jobs=args.jobs
+def setup_discovery_tool(args) -> Any:
+    discovery_threads = 1
+    ...
+    return MemeDiscoveryTool(..., threads=discovery_threads)
+    ...
+    return SitegaDiscoveryTool(..., threads=discovery_threads)
 ```
 
-### MIMOSA comparator options
+For tools where `None` means "tool default may use multiple cores", prefer `1`
+if the tool supports an explicit single-thread option. Use `None` only for tools
+that do not expose thread control.
 
-Replace the old continuous group with a MIMOSA group.
+Document this as an intentional policy, not an accidental limitation.
 
-Suggested options:
+## Pipeline wiring
 
-```text
---mimosa-metric {co,co_rowwise,dice,dice_rowwise,cosine}
---comparison-criterion {score,p-value}
---comparison-threshold FLOAT
---mimosa-search-range INT
---mimosa-null-distribution PATH
-```
-
-Optional MIMOSA null-distribution search support can be added if needed:
-
-```text
---mimosa-null-search-dir PATH
---mimosa-effective-number-of-targets INT
-```
-
-Keep the first implementation minimal unless there is a current use case for
-search directories or explicit E-value target count. The required parameter for
-`p-value` mode is `--mimosa-null-distribution`.
-
-Defaults:
-
-- `--mimosa-metric co`;
-- `--comparison-criterion score`;
-- `--comparison-threshold` default should be derived from the criterion;
-- `--mimosa-search-range 10`.
-
-Threshold defaults:
-
-- `score`: `0.9`;
-- `p-value`: `0.05`.
-
-Do not use one hard-coded threshold default in argparse, because the correct
-default depends on the selected criterion. Set `default=None` in argparse and
-resolve the final threshold after parsing.
-
-Validation:
-
-- if `--comparison-criterion p-value` is selected, require
-  `--mimosa-null-distribution`;
-- if `--comparison-criterion score` is selected, do not enable p-value
-  annotation;
-- reject missing `adj.p-value` result columns when p-value filtering is active.
-
-## Code changes
-
-### `src/motifhorde/cli.py`
-
-Update parser examples:
-
-- replace `-c continuous --c-metric co` with
-  `-c mimosa --mimosa-metric co`;
-- add one example for adjusted p-value filtering with
-  `--comparison-criterion p-value` and `--mimosa-null-distribution`.
-
-Update comparator choices:
+Add `jobs` to `DeNovoPipeline`:
 
 ```python
-choices=["tomtom", "mimosa"]
+class DeNovoPipeline:
+    def __init__(
+        self,
+        discovery_tool: MotifDiscoveryTool,
+        evaluator: PerformanceEvaluator,
+        comparator: UniversalMotifComparator,
+        fpr_threshold: float = 0.001,
+        number_of_motifs: int = 5,
+        jobs: int = 1,
+        seed: int | None = None,
+    ) -> None:
+        ...
 ```
 
-Remove old comparator options:
-
-- `--tomtom-jobs`;
-- all `--c-*` options.
-
-Add `--jobs` once.
-
-Add a post-parse validation function, for example:
+Pass `jobs` and `seed` into `Bootstrapper`:
 
 ```python
-def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+bootstrapper = Bootstrapper(
+    self.discovery_tool,
+    self.evaluator,
+    output_dir,
+    jobs=self.jobs,
+    seed=self.seed,
+)
+```
+
+Use the existing CLI `--seed` as the base seed for bootstrap task seed
+derivation. This keeps one reproducibility control for the whole pipeline.
+
+Do not pass comparator objects into bootstrap workers. Comparison happens after
+bootstrap in the parent process. The `jobs` value here is the resolved positive
+worker count for bootstrap, not a new CLI option.
+
+## Bootstrap task model
+
+Use `TypedDict` instead of new data classes. This keeps the implementation
+simple and aligned with the repository style.
+
+Suggested shapes in `src/motifhorde/evaluation.py`:
+
+```python
+class BootstrapTask(TypedDict):
+    index: int
+    params: dict[str, Any]
+    params_suffix: str
+    step_name: str
+    fg_path: str
+    bg_path: str
+    output_dir: str
+    number_of_motifs: int
+    seed: int | None
+
+
+class BootstrapDiscoveryResult(TypedDict):
+    index: int
+    params: dict[str, Any]
+    params_suffix: str
+    step_name: str
+    motifs: list[GenericModel]
+```
+
+Keep task data explicit. Do not hide paths, params, jobs, or seed in globals.
+
+## Bootstrap implementation
+
+Refactor `Bootstrapper.run()` into small functions with clear responsibility:
+
+```text
+run()
+  prepare task root directory
+  build bootstrap discovery tasks and write per-task FASTA files
+  run discovery tasks sequentially or in a process pool
+  evaluate returned motifs in the parent process
+  return statistics and bootstrap motifs
+```
+
+Suggested private functions:
+
+```python
+def _bootstrap_indices(n_peaks: int, step_name: str) -> tuple[list[int], list[int]]:
+    ...
+
+
+def _build_bootstrap_tasks(...) -> tuple[list[BootstrapTask], dict[int, SequenceBatch]]:
+    ...
+
+
+def _run_discovery_task(
+    discovery_tool: MotifDiscoveryTool,
+    task: BootstrapTask,
+) -> BootstrapDiscoveryResult:
+    ...
+
+
+def _run_bootstrap_discovery_tasks(
+    discovery_tool: MotifDiscoveryTool,
+    tasks: list[BootstrapTask],
+    jobs: int,
+) -> list[BootstrapDiscoveryResult]:
+    ...
+
+
+def _evaluate_bootstrap_results(...) -> tuple[dict[str, Any], list[GenericModel]]:
     ...
 ```
 
-Keep it focused on cross-option validation:
+`_run_discovery_task` must be a top-level function, not a nested function, so it
+can be used by `ProcessPoolExecutor` with spawn-style process creation.
 
-- `--jobs`;
-- `--comparison-criterion p-value` requiring
-  `--mimosa-null-distribution`;
-- threshold default resolution.
-
-Avoid scattering this validation through setup functions.
-
-Update `setup_discovery_tool(args)`:
-
-- MEME gets `threads=_external_thread_count(args.jobs)`;
-- Dimont gets `threads=_external_thread_count(args.jobs)`;
-- SlimDimont gets `threads=_external_thread_count(args.jobs)`;
-- SiteGA gets `threads=_external_thread_count(args.jobs)`;
-- STREME and BaMM remain unchanged unless a supported thread option is added
-  deliberately.
-
-Update `setup_comparator(args)`:
-
-TomTom:
+The worker should do only discovery:
 
 ```python
-return TomtomComparator(
-    metric=args.tomtom_metric,
-    n_jobs=args.jobs,
-    seed=args.seed,
-    pfm_mode=args.pfm_mode,
-)
+def _run_discovery_task(discovery_tool, task):
+    try:
+        kwargs = dict(task["params"])
+        if task["seed"] is not None and discovery_tool.name == "sitega":
+            kwargs["seed"] = task["seed"]
+
+        motifs = discovery_tool.discover(
+            task["fg_path"],
+            task["bg_path"],
+            task["output_dir"],
+            number_of_motifs=task["number_of_motifs"],
+            **kwargs,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Bootstrap discovery failed for params={task['params']} "
+            f"split={task['step_name']}"
+        ) from exc
+
+    return {
+        "index": task["index"],
+        "params": task["params"],
+        "params_suffix": task["params_suffix"],
+        "step_name": task["step_name"],
+        "motifs": motifs,
+    }
 ```
 
-MIMOSA:
+Evaluate motifs in the parent process after discovery completes. This avoids
+pickling and repeatedly sending the full test/background sequence batches to
+workers. It also keeps side effects simpler:
 
 ```python
-return UniversalMotifComparator(
-    name="mimosa_comparator",
-    metric=args.mimosa_metric,
-    n_jobs=args.jobs,
-    seed=args.seed,
-    comparison_criterion=args.comparison_criterion,
-    comparison_threshold=args.comparison_threshold,
-    search_range=args.mimosa_search_range,
-    pvalue=args.comparison_criterion == "p-value",
-    null_distribution=args.mimosa_null_distribution,
-)
+for result in sorted(results, key=lambda item: item["index"]):
+    test_peaks = test_batches[result["index"]]
+    for motif in result["motifs"]:
+        stats = self.evaluator.evaluate(
+            motif,
+            test_peaks,
+            background,
+            err_threshold,
+        )
+        motif.name = (
+            f"{motif.name}_{result['params_suffix']}_{result['step_name']}"
+        )
+        statistics[motif.name] = stats
+        bootstrap_motifs.append(motif)
 ```
 
-The exact parameter names on `UniversalMotifComparator` can be adjusted, but
-avoid keeping `filter_type` as a public constructor concept if the pipeline now
-uses a comparison criterion. `filter_type` is tied to the old `--c-filter`
-model and is less explicit.
+This keeps output names and result ordering deterministic.
 
-### `src/motifhorde/comparison.py`
+## Process pool details
 
-Keep the wrappers thin. Do not duplicate MIMOSA null distribution loading or
-p-value correction logic locally.
-
-Change `UniversalMotifComparator.compare(...)` to use the public MIMOSA API
-that applies p-value annotation:
+Use `ProcessPoolExecutor` only when `jobs > 1`:
 
 ```python
-from mimosa.api import compare_one_to_many as mimosa_compare_one_to_many
+if jobs == 1:
+    return [_run_discovery_task(discovery_tool, task) for task in tasks]
+
+mp_context = multiprocessing.get_context("spawn")
+with ProcessPoolExecutor(max_workers=jobs, mp_context=mp_context) as executor:
+    results = list(
+        executor.map(
+            _run_discovery_task_with_tool,
+            repeat(discovery_tool),
+            tasks,
+        )
+    )
 ```
 
-Inside the wrapper, call the API with in-memory models:
+Implementation can use either:
+
+- a small top-level wrapper accepting `(discovery_tool, task)`;
+- `executor.submit(...)` with explicit arguments.
+
+Prefer the simpler version that is easiest to test.
+
+Use `spawn` for the parallel path. It is safer for native extensions and global
+C++ state than inheriting already-imported state with `fork`. The startup
+overhead is small relative to SiteGA training time.
+
+## Temporary directory handling
+
+Create one parent temporary directory for all bootstrap tasks:
 
 ```python
-mimosa_compare_one_to_many(
-    query=motif,
-    targets=list(motifs_2),
-    strategy="profile",
-    sequences=sequences,
-    comparator=self.config,
-)
+with tempfile.TemporaryDirectory(
+    dir=os.path.join(self.output_dir, self.discovery_tool.name),
+    prefix="bootstrap_parallel_",
+) as task_root:
+    ...
 ```
 
-For `TomtomComparator`, evaluate whether it should also use the MIMOSA API with
-`strategy="motif"`. This is preferable for consistency, but only change it if
-tests confirm the output remains equivalent. If not, keep TomTom score-only for
-this update and still pass `n_jobs=args.jobs`.
-
-Normalize result frames through one helper:
-
-```python
-def _records_to_frame(records):
-    return pd.DataFrame.from_records(records)
-```
-
-MIMOSA `ComparisonResult` is mapping-like and emits public columns such as:
-
-- `score`;
-- `p-value`;
-- `adj.p-value`;
-- `E-value`.
-
-Do not rename MIMOSA output columns globally. Instead, map CLI criterion to the
-column used by MotifHORDE filtering.
-
-Suggested helper:
-
-```python
-def comparison_column_for_criterion(criterion: str) -> str:
-    if criterion == "score":
-        return "score"
-    if criterion == "p-value":
-        return "adj.p-value"
-    raise ValueError(...)
-```
-
-### `src/motifhorde/pipeline.py`
-
-The pipeline currently infers the comparison column from dataframe columns:
-
-```python
-def _comparison_column(frame: pd.DataFrame) -> str:
-    if "p-value" in frame.columns:
-        return "p-value"
-    if "score" in frame.columns:
-        return "score"
-```
-
-Replace implicit inference with explicit comparator configuration.
-
-Add a small comparator-facing contract:
-
-- comparator has `comparison_criterion`;
-- comparator has `comparison_threshold`;
-- comparator can expose `comparison_column`.
-
-Keep this simple. Do not introduce abstract base classes or config objects for
-this unless the code becomes materially clearer.
-
-Filtering rules:
-
-- `score`: similar if `score >= threshold`;
-- `p-value`: similar if `adj.p-value <= threshold`.
-
-Sorting rules:
-
-- `score`: descending;
-- `p-value`: ascending.
-
-Update these functions to use the explicit column and direction:
-
-- `_filter_similar_matches`;
-- `_sort_comparisons`;
-- `_is_similar_value`;
-- `_comparison_sort_ascending`;
-- `_comparison_column`.
-
-Prefer passing the comparator or criterion into these helpers rather than using
-module-level constants. The old constants:
-
-```python
-SIMILARITY_PVALUE_THRESHOLD = 0.001
-SIMILARITY_SCORE_THRESHOLD = 0.9
-```
-
-should either be removed or replaced by named defaults in one place. Avoid
-keeping stale constants that no longer control behavior.
-
-Places that call `_filter_similar_matches` must be updated:
-
-- `_compare_bootstrap_motifs`;
-- `_select_best_full_motif`;
-- `_select_nonredundant_motifs`;
-- `_deduplicate_final_motifs`.
-
-When p-value mode is active and `adj.p-value` is missing, raise a clear error:
+Inside it create stable per-task directories:
 
 ```text
-Comparison results do not contain adjusted p-values. Provide a compatible MIMOSA
-null distribution with --mimosa-null-distribution.
+task_0000_length-10_lpd-10_odd/
+task_0001_length-10_lpd-10_even/
+...
 ```
 
-### `src/motifhorde/discovery.py`
+The parent process should write:
 
-Update `SitegaDiscoveryTool`:
+- `train.fasta`;
+- `background.fasta`.
 
-- add `threads: int | None = None` to `__init__`;
-- store `self.threads`;
-- pass `num_threads=self.threads or 0` to `sitega.train(...)`.
+Each worker uses its own task directory as discovery output. This avoids file
+name collisions from external tools and from SiteGA log/model files.
 
-Use `0` only if the SiteGA binding contract still means "use OMP_NUM_THREADS".
-If the CLI always passes a resolved positive value, passing `self.threads`
-directly is simpler.
+The temporary root must stay alive until:
 
-Do not add thread parameters to tools that do not support them.
+- all workers finish;
+- all returned motifs are evaluated;
+- no worker can still read input FASTA files.
 
-Current supported mappings:
+## Seed handling
 
-- MEME: `-p`;
-- Dimont: `threads=...`;
-- SlimDimont: `threads=...`;
-- SiteGA: `num_threads=...`.
+Add explicit SiteGA seed support:
 
-STREME and BaMM remain unchanged in this update.
+1. Add `seed: int | None = None` to `SitegaDiscoveryTool.__init__`.
+2. Store it as `self.seed`.
+3. In `discover()`, pass an explicit seed to `sitega.train`:
 
-## Documentation changes
+```python
+seed = int(kwargs.get("seed", self.seed or 0))
+...
+sitega.train(..., seed=seed, ...)
+```
 
-Update `README.md`:
+Derive per-task seeds in `Bootstrapper` when a base seed is available:
 
-- replace `-c continuous` with `-c mimosa`;
-- replace `--c-metric` with `--mimosa-metric`;
-- document `--comparison-criterion score|p-value`;
-- document that CLI `p-value` means MIMOSA `adj.p-value`;
-- document that p-value mode requires `--mimosa-null-distribution`;
-- document `--jobs` as the single parallelism option;
-- remove references to `--tomtom-jobs`, `--c-jobs`, `--meme-p`, and
-  `--jstacs-threads`.
+```python
+def _task_seed(base_seed: int | None, task_index: int) -> int | None:
+    if base_seed is None:
+        return None
+    return base_seed + task_index + 1
+```
 
-Add a short example:
+Keep this deliberately simple and deterministic. Avoid Python's built-in
+`hash()`, because it is salted per process.
+
+If no base seed is provided, leave `seed=None` and keep current non-deterministic
+SiteGA behavior.
+
+Do not inject `seed` into every discovery tool in the first patch. Some tools
+already manage seeds through constructor arguments, and some ignore seeds. For
+the first patch, pass per-task seed only to SiteGA, where the C++ binding already
+supports it and where parallel same-second `time(NULL)` collisions matter.
+
+## Tool-specific impact
+
+### SiteGA
+
+- Main beneficiary.
+- Each training run remains serial and memory-isolated.
+- Multiple trainings can run concurrently through separate Python processes.
+- `--jobs N` controls how many SiteGA trainings run at the same time during
+  bootstrap.
+- SiteGA receives `num_threads=1` in discovery tool setup.
+- Recommended usage:
 
 ```bash
-motifhorde peaks.fa bg.fa promoters.fa output/ \
-  -c mimosa \
-  --mimosa-metric co \
-  --comparison-criterion p-value \
-  --mimosa-null-distribution profile-null.joblib \
-  --jobs -1
+--jobs 6 --seed 42
 ```
+
+### MEME and STREME
+
+- Parallel bootstrap can run multiple external tool processes at once.
+- Internal thread options should be disabled or set to `1` for discovery.
+- This may improve wall time if CPU and RAM are available.
+- Watch for external tool memory use and temporary output volume.
+
+### BaMM
+
+- Can benefit if individual BaMM runs are independent and system resources are
+  sufficient.
+- Avoid internal multithreading in bootstrap subprocesses where possible.
+
+### DiMotif/SlimDimont
+
+- Parallel bootstrap may launch multiple JVMs.
+- Each JVM should be configured for one internal thread where the tool supports
+  it.
+- This can be memory-heavy because each JVM may reserve up to `java_xmx`.
+- Users should choose `--jobs` conservatively for Java tools.
+
+### MIMOSA comparison
+
+- MIMOSA comparison happens after bootstrap, so it can use the same resolved
+  `--jobs` budget.
+- Do not add an outer MIMOSA process pool.
+- Keep using the existing `UniversalMotifComparator(..., n_jobs=..., ...)` setup
+  path and rely on MIMOSA's internal parallel implementation.
+
+### Tomtom comparison
+
+- Do not change Tomtom parallelism in this patch.
+- Keep existing `TomtomComparator(..., n_jobs=args.jobs, ...)` behavior if that
+  is already how Tomtom is configured.
+- Do not add a new process pool or task scheduler around Tomtom.
+
+## Final discovery parallelism
+
+Do not parallelize final discovery in the first patch.
+
+Reason:
+
+- final selection depends on bootstrap comparison records;
+- each final discovery is followed by matching against odd/even references;
+- the logic is more coupled than bootstrap discovery;
+- bootstrap is the larger and simpler win for SiteGA grids.
+
+Possible phase 2:
+
+- collect final parameter groups;
+- run full discovery for each group in a process pool using the same `--jobs`
+  budget;
+- keep discovery tool internal threads at `1`;
+- return full motif lists;
+- perform matching and final motif assignment in the parent process.
+
+Keep this as a separate patch after bootstrap parallelism is stable.
+
+## Optional SiteGA speed knobs
+
+These should be separate follow-up changes, not part of bootstrap parallelism:
+
+### `--sitega-pop-size`
+
+Expose the existing C++ `pop_size` parameter:
+
+```text
+--sitega-pop-size INT
+```
+
+Expected effect:
+
+- lower values should reduce runtime;
+- lower values may reduce motif quality or search stability.
+
+Implementation:
+
+- add `pop_size: int | None = None` to `SitegaDiscoveryTool`;
+- pass `pop_size=self.pop_size or 0` to `sitega.train`;
+- validate `1 <= pop_size <= 500` if provided.
+
+### `--sitega-max-peak-len`
+
+Expose current hard-coded `max_peak_len=5000`:
+
+```text
+--sitega-max-peak-len INT
+```
+
+Expected effect:
+
+- shorter peak windows reduce SiteGA scan/evaluation work;
+- may change biological sensitivity if peaks are truncated.
+
+This should be documented as a runtime/quality tradeoff.
 
 ## Tests
 
-### CLI parser tests
+Add unit tests for CLI:
 
-Update `tests/test_cli_tools.py` or add focused CLI tests:
+- parser help keeps a single `--jobs` option;
+- parser does not include `--bootstrap-jobs`;
+- accepts `1`, positive integers, and `-1`;
+- rejects `0` and values less than `-1`;
+- setup passes resolved positive jobs into `DeNovoPipeline` for bootstrap;
+- discovery tool setup passes `threads=1` to threaded discovery tools even when
+  `--jobs > 1`;
+- MIMOSA comparator setup keeps using its existing internal `n_jobs` path;
+- Tomtom comparator setup behavior remains unchanged.
 
-- parser accepts `-c mimosa`;
-- parser rejects `-c continuous`;
-- help includes `--mimosa-metric`, `--comparison-criterion`,
-  `--mimosa-null-distribution`, and `--jobs`;
-- help does not include removed options;
-- `--comparison-criterion p-value` without `--mimosa-null-distribution` fails;
-- `--jobs 0` fails;
-- `--jobs -2` fails.
+Add unit tests for bootstrap task construction:
 
-### Comparator setup tests
+- correct number of tasks for a small grid;
+- odd/even split indices match current behavior;
+- each task has a unique output directory;
+- task ordering is stable.
 
-Add tests for `setup_comparator(args)`:
+Add unit tests for sequential compatibility:
 
-- TomTom receives `n_jobs=args.jobs`;
-- MIMOSA receives `n_jobs=args.jobs`;
-- MIMOSA score mode sets `pvalue=False`;
-- MIMOSA p-value mode sets `pvalue=True` and passes the null distribution path;
-- MIMOSA p-value criterion maps to `adj.p-value`.
+- `jobs=1` produces the same motif names and statistics as the current
+  sequential path using a fake discovery tool.
 
-### Pipeline filtering tests
+Add unit tests for process mode:
 
-Add or update tests around the pure filtering helpers:
+- use a top-level pickleable fake discovery tool;
+- run a tiny grid with `jobs=2`;
+- assert the same motif names/statistics as sequential mode;
+- assert result order is deterministic.
 
-- score mode keeps rows with `score >= threshold`;
-- score mode sorts descending;
-- p-value mode keeps rows with `adj.p-value <= threshold`;
-- p-value mode sorts ascending;
-- p-value mode raises a clear error when `adj.p-value` is missing.
+Add SiteGA seed tests:
 
-Keep these tests small and dataframe-based. Do not require real MIMOSA null
-distribution files for pipeline filtering behavior.
+- `SitegaDiscoveryTool(seed=123)` passes `seed=123` to `sitega.train`;
+- bootstrap task seed derivation produces unique per-task seeds from `--seed`;
+- without base seed, SiteGA task seed remains `None` and current behavior is
+  preserved.
 
-### Discovery thread propagation tests
+Avoid real external tools in normal tests. Keep real SiteGA/MEME/STREME runs
+behind the existing opt-in external fullrun mechanism.
 
-Update existing discovery tests:
+## Validation commands
 
-- MEME command includes `-p <jobs>`;
-- Dimont args include `threads=<jobs>`;
-- SlimDimont args include `threads=<jobs>`;
-- SiteGA `sitega.train(...)` receives `num_threads=<jobs>`.
+Fast validation:
 
-Add CLI setup tests:
+```bash
+uv run pytest tests/test_cli_tools.py tests/test_sitega_discovery.py -q
+uv run pytest tests/test_pipeline_selection.py tests/test_core_api.py -q
+uv run pytest -q
+```
 
-- `--jobs 3 -t meme` creates `MemeDiscoveryTool` with `threads == 3`;
-- `--jobs 3 -t dimont` creates `DimontDiscoveryTool` with `threads == 3`;
-- `--jobs 3 -t slim` creates `SlimDiscoveryTool` with `threads == 3`;
-- `--jobs 3 -t sitega` creates `SitegaDiscoveryTool` with `threads == 3`.
+Optional SiteGA smoke test after implementation:
 
-For `--jobs -1`, monkeypatch `os.cpu_count()` and assert external tool thread
-counts receive the resolved positive value.
+```bash
+uv run python -c 'import sitega; print(sitega.__file__)'
+```
 
-### MIMOSA p-value integration test
+Optional real-data validation should remain opt-in because SiteGA is slow:
 
-Add one focused test around `UniversalMotifComparator` with monkeypatched MIMOSA
-API:
+```bash
+HORDEMOTIFS_RUN_FULLRUN=1 \
+HORDEMOTIFS_FULLRUN_LOG_DIR=/tmp/hordemotifs-real-fullrun-logs \
+HORDEMOTIFS_STREME_COMMAND=/home/anton/miniconda3/envs/motifhorde/bin/streme \
+HORDEMOTIFS_JAVA_COMMAND=/home/anton/miniconda3/bin/java \
+/home/anton/miniconda3/envs/motifhorde/bin/python -m pytest \
+  tests/test_external_fullrun.py::test_real_data_full_pipeline_smoke_with_verbose_log \
+  -q
+```
 
-- monkeypatch `motifhorde.comparison.mimosa_compare_one_to_many`;
-- return one `ComparisonResult` or dict containing `adj.p-value`;
-- assert `UniversalMotifComparator.compare(...)` returns a frame with
-  `adj.p-value`.
+Benchmark recommendation for SiteGA:
 
-This verifies MotifHORDE uses the API boundary that can annotate p-values
-without requiring an expensive real null distribution fixture.
+```bash
+time motifhorde PEAKS.fa PEAKS_gb.fa promoters.fa out-seq \
+  --tool sitega \
+  -n 10 \
+  --lpd 10-40-10 \
+  -l 10-16-2 \
+  -m auROC \
+  -c mimosa \
+  --mimosa-metric dice \
+  --jobs 1 \
+  --seed 42
+
+time motifhorde PEAKS.fa PEAKS_gb.fa promoters.fa out-par \
+  --tool sitega \
+  -n 10 \
+  --lpd 10-40-10 \
+  -l 10-16-2 \
+  -m auROC \
+  -c mimosa \
+  --mimosa-metric dice \
+  --jobs 6 \
+  --seed 42
+```
+
+Compare:
+
+- wall time;
+- successful completion;
+- number of bootstrap motifs;
+- no SIGSEGV;
+- no duplicate SiteGA seeds in logs when `--seed` is used.
+
+## Risks and mitigations
+
+### Pickling failures
+
+Risk:
+
+- `ProcessPoolExecutor` requires the discovery tool and returned models to be
+  pickleable.
+
+Mitigation:
+
+- keep worker functions top-level;
+- keep task data as plain dictionaries, strings, integers, and lists;
+- test process mode with a top-level fake discovery tool;
+- if a specific discovery tool cannot be pickled, add a clear error message and
+  keep sequential fallback for that tool.
+
+### Memory pressure
+
+Risk:
+
+- `--jobs N` may launch `N` external tools or JVMs during bootstrap.
+
+Mitigation:
+
+- discovery tool internal threads are set to `1`;
+- document conservative `--jobs` values for Java tools;
+- keep final discovery sequential in the first patch.
+
+### Duplicate seeds
+
+Risk:
+
+- parallel SiteGA jobs without explicit seeds may share `time(NULL)` values.
+
+Mitigation:
+
+- derive per-task SiteGA seeds from `--seed`;
+- document that reproducible parallel SiteGA runs should use `--seed`.
+
+### Noisy child process output
+
+Risk:
+
+- external tools or SiteGA `printf` output may interleave on stdout.
+
+Mitigation:
+
+- keep per-task output directories and log files;
+- do not solve stdout capture in the first patch unless interleaving becomes a
+  practical problem.
+
+### Behavior changes for discovery tools
+
+Risk:
+
+- tools that previously received `threads=args.jobs` now receive one internal
+  thread for discovery.
+
+Mitigation:
+
+- this is intentional to keep `--jobs` from becoming a multiplier;
+- document the policy in README;
+- benchmark representative tools after the patch.
 
 ## Implementation order
 
-1. Update CLI parser and argument validation.
-2. Add shared `--jobs` plumbing into comparator setup.
-3. Add shared `--jobs` plumbing into discovery setup.
-4. Extend `SitegaDiscoveryTool` to accept and pass thread count.
-5. Update `UniversalMotifComparator` to use MIMOSA API for one-to-many
-   comparison.
-6. Replace implicit pipeline comparison-column detection with explicit criterion
-   and threshold handling.
-7. Update tests for parser, setup, filtering, and thread propagation.
-8. Update README examples and option documentation.
-9. Run formatting and tests.
+1. Keep the CLI surface unchanged: no new jobs option.
+2. Update `--jobs` help text to explain bootstrap process parallelism and
+   comparator parallelism.
+3. Resolve `args.jobs` once for bootstrap worker count with `_resolve_jobs`.
+4. Configure discovery tools with one internal thread where supported.
+5. Keep comparator setup on its existing path; do not add wrapper-level
+   parallelism for MIMOSA or Tomtom.
+6. Add `jobs` and `seed` plumbing through CLI setup into `DeNovoPipeline`.
+7. Add `jobs` and `seed` to `Bootstrapper`.
+8. Extract current odd/even split logic into a small pure helper.
+9. Add task construction that writes per-task FASTA files under one temporary
+   root.
+10. Add top-level discovery worker and result merging.
+11. Add sequential execution path using the same task/result code.
+12. Add process execution path for `jobs > 1`.
+13. Add SiteGA seed support and per-task seed derivation.
+14. Add tests for CLI, tool thread policy, comparator jobs, task construction,
+    sequential compatibility, process mode, and SiteGA seed passing.
+15. Update README with the new `--jobs` semantics and recommended SiteGA
+    command.
+16. Run fast test suite.
+17. Optionally run real-data SiteGA benchmark.
 
-Suggested verification commands:
+## Acceptance criteria
 
-```bash
-uv run ruff check .
-uv run pytest
-```
-
-If external smoke tests are needed, run them separately because they depend on
-installed external tools and are slower.
-
-## Expected behavior changes
-
-Breaking CLI changes:
-
-- `-c continuous` is invalid;
-- all `--c-*` options are invalid;
-- `--tomtom-jobs` is invalid;
-- `--meme-p` is invalid;
-- `--jstacs-threads` is invalid.
-
-New behavior:
-
-- `-c mimosa` selects profile comparison through MIMOSA;
-- `--jobs` controls all supported comparison and discovery parallelism;
-- score filtering uses `score >= threshold`;
-- p-value filtering uses `adj.p-value <= threshold`;
-- p-value mode requires a prepared MIMOSA null distribution.
-
-## Compatibility risks
-
-The main risk is that existing scripts using old CLI options will fail. This is
-acceptable because backward compatibility is explicitly not required.
-
-The second risk is p-value support through MIMOSA API. This should be tested
-with a monkeypatched unit test first, then with one real compatible null
-distribution file if a fixture is available.
-
-The third risk is `--jobs -1` behavior for external tools. Resolve it once in
-CLI setup and pass only positive thread counts to tools that require positive
-values.
+- No new public jobs parameter is added.
+- Existing `--jobs` validation remains simple and consistent.
+- `--jobs 1` follows the same discovery/evaluation order as before.
+- `--jobs N` runs independent bootstrap discovery tasks in separate processes.
+- Discovery tools do not use internal multithreading during bootstrap.
+- MIMOSA comparison uses its existing internal `n_jobs` support with the same
+  resolved jobs count.
+- Tomtom behavior is unchanged except for any existing `n_jobs` value it already
+  receives.
+- SiteGA bootstrap tasks do not share process memory.
+- SiteGA parallel bootstrap with `--seed` uses deterministic unique seeds per
+  task.
+- Results are returned in deterministic task order.
+- Normal test suite passes.
+- No real external fullrun is added to default test execution.
