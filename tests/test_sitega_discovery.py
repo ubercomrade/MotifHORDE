@@ -71,8 +71,11 @@ def test_sitega_discovery_uses_returned_mat_path(monkeypatch, tmp_path):
             "log_file": "sitega.log",
             "num_threads": 0,
             "seed": 0,
-            "pop_size": 100,
+            "pop_size": 500,
             "num_motifs": 20,
+            "generations": 0,
+            "mutation_attempts": 0,
+            "stale_generations": 0,
         }
     ]
     assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 4)]
@@ -111,6 +114,78 @@ def test_sitega_discovery_normalizes_returned_path_without_extension(
     assert returned_mat.with_suffix(".mat").exists()
 
 
+def test_sitega_discovery_reads_ranked_outputs_from_returned_mat_path(
+    monkeypatch, tmp_path
+):
+    foreground = tmp_path / "foreground.fa"
+    background = tmp_path / "background.fa"
+    output_dir = tmp_path / "sitega-output"
+    returned_mat = output_dir / "foreground_mat1"
+
+    _write_fasta(foreground)
+    _write_fasta(background)
+
+    def train(**kwargs):
+        output_dir.mkdir(exist_ok=True)
+        _write_sitega_mat(returned_mat, length=4)
+        _write_sitega_mat(output_dir / "foreground_mat2", length=4)
+        _write_sitega_mat(output_dir / "foreground_mat10", length=4)
+        return 0, os.fspath(returned_mat), "", 0.25
+
+    monkeypatch.setitem(sys.modules, "sitega", SimpleNamespace(train=train))
+
+    motifs = SitegaDiscoveryTool().discover(
+        os.fspath(foreground),
+        os.fspath(background),
+        os.fspath(output_dir),
+        number_of_motifs=3,
+        length=4,
+        lpd=10,
+    )
+
+    assert [(motif.name, motif.length) for motif in motifs] == [
+        ("Sitega-1", 4),
+        ("Sitega-2", 4),
+        ("Sitega-3", 4),
+    ]
+    assert not returned_mat.exists()
+    assert (output_dir / "foreground_mat1.mat").exists()
+    assert (output_dir / "foreground_mat2.mat").exists()
+    assert (output_dir / "foreground_mat10.mat").exists()
+
+
+def test_sitega_discovery_requests_at_least_requested_motif_count(
+    monkeypatch, tmp_path
+):
+    foreground = tmp_path / "foreground.fa"
+    background = tmp_path / "background.fa"
+    output_dir = tmp_path / "sitega-output"
+    returned_mat = output_dir / "foreground_mat1"
+    calls = []
+
+    _write_fasta(foreground)
+    _write_fasta(background)
+
+    def train(**kwargs):
+        calls.append(kwargs)
+        output_dir.mkdir(exist_ok=True)
+        _write_sitega_mat(returned_mat, length=4)
+        return 0, os.fspath(returned_mat), "", 0.25
+
+    monkeypatch.setitem(sys.modules, "sitega", SimpleNamespace(train=train))
+
+    SitegaDiscoveryTool(num_motifs=2).discover(
+        os.fspath(foreground),
+        os.fspath(background),
+        os.fspath(output_dir),
+        number_of_motifs=5,
+        length=4,
+        lpd=10,
+    )
+
+    assert calls[0]["num_motifs"] == 5
+
+
 def test_sitega_discovery_passes_thread_count(monkeypatch, tmp_path):
     foreground = tmp_path / "foreground.fa"
     background = tmp_path / "background.fa"
@@ -139,6 +214,42 @@ def test_sitega_discovery_passes_thread_count(monkeypatch, tmp_path):
     )
 
     assert calls[0]["num_threads"] == 3
+
+
+def test_sitega_discovery_passes_search_budget(monkeypatch, tmp_path):
+    foreground = tmp_path / "foreground.fa"
+    background = tmp_path / "background.fa"
+    output_dir = tmp_path / "sitega-output"
+    returned_mat = tmp_path / "returned.mat"
+    calls = []
+
+    _write_fasta(foreground)
+    _write_fasta(background)
+
+    def train(**kwargs):
+        calls.append(kwargs)
+        output_dir.mkdir(exist_ok=True)
+        _write_sitega_mat(returned_mat, length=4)
+        return 0, os.fspath(returned_mat), "", 0.25
+
+    monkeypatch.setitem(sys.modules, "sitega", SimpleNamespace(train=train))
+
+    SitegaDiscoveryTool(
+        generations=40,
+        mutation_attempts=8,
+        stale_generations=12,
+    ).discover(
+        os.fspath(foreground),
+        os.fspath(background),
+        os.fspath(output_dir),
+        number_of_motifs=1,
+        length=4,
+        lpd=10,
+    )
+
+    assert calls[0]["generations"] == 40
+    assert calls[0]["mutation_attempts"] == 8
+    assert calls[0]["stale_generations"] == 12
 
 
 def test_sitega_discovery_passes_constructor_seed(monkeypatch, tmp_path):

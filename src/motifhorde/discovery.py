@@ -236,15 +236,50 @@ def _normalize_sitega_mat_path(path: str) -> str:
     return mat_path
 
 
+def _sitega_mat_rank(path: str) -> int:
+    root, extension = os.path.splitext(path)
+    rank_source = root if extension.lower() == ".mat" else path
+    match = re.search(r"_mat(\d+)$", rank_source)
+    return int(match.group(1)) if match is not None else 0
+
+
+def _sitega_ranked_paths_from(path: str) -> list[str]:
+    root, extension = os.path.splitext(path)
+    rank_source = root if extension.lower() == ".mat" else path
+    match = re.search(r"^(.*_mat)\d+$", rank_source)
+    if match is None:
+        return [path] if os.path.exists(path) else []
+
+    prefix = match.group(1)
+    paths = []
+    for candidate in glob.glob(f"{glob.escape(prefix)}*"):
+        suffix = candidate[len(prefix) :]
+        if suffix.lower().endswith(".mat"):
+            suffix = suffix[:-4]
+        if suffix.isdigit():
+            paths.append(candidate)
+    return sorted(set(paths), key=lambda item: (_sitega_mat_rank(item), item))
+
+
 def _sitega_output_paths(output_dir: str, mat_path: str) -> list[str]:
-    paths = [mat_path] if mat_path and os.path.exists(mat_path) else []
+    paths = _sitega_ranked_paths_from(mat_path) if mat_path else []
     if not paths:
-        for pattern in ["train_mat*", "train.fa_mat*", "*.mat"]:
-            paths = sorted(glob.glob(os.path.join(output_dir, pattern)))
+        for pattern in ["train_mat*", "train.fa_mat*", "*_mat*", "*.mat"]:
+            paths = sorted(
+                glob.glob(os.path.join(output_dir, pattern)),
+                key=lambda item: (_sitega_mat_rank(item), item),
+            )
             if paths:
                 break
 
-    return [_normalize_sitega_mat_path(path) for path in paths]
+    normalized = []
+    seen = set()
+    for path in paths:
+        normalized_path = _normalize_sitega_mat_path(path)
+        if normalized_path not in seen:
+            normalized.append(normalized_path)
+            seen.add(normalized_path)
+    return normalized
 
 
 class StremeDiscoveryTool(MotifDiscoveryTool):
@@ -656,15 +691,20 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         seed: int | None = None,
         pop_size: int = 100,
         num_motifs: int = 20,
+        generations: int | None = 80,
+        mutation_attempts: int | None = 12,
+        stale_generations: int | None = 20,
     ) -> None:
         super().__init__(name="sitega")
         self.nmotifs = nmotifs
         self.threads = threads
         self.seed = seed
-        # GA population size and number of motifs SiteGA writes to disk.
-        # Not exposed via CLI; fixed class-level defaults.
+        # SiteGA tuning knobs are intentionally not exposed via CLI.
         self.pop_size = pop_size
         self.num_motifs = num_motifs
+        self.generations = generations
+        self.mutation_attempts = mutation_attempts
+        self.stale_generations = stale_generations
 
     def discover(
         self,
@@ -697,7 +737,10 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
             num_threads=self.threads or 0,
             seed=seed,
             pop_size=self.pop_size,
-            num_motifs=self.num_motifs,
+            num_motifs=max(self.num_motifs, number_of_motifs),
+            generations=self.generations or 0,
+            mutation_attempts=self.mutation_attempts or 0,
+            stale_generations=self.stale_generations or 0,
         )
         if rc != 0:
             raise RuntimeError(f"SiteGA training failed with return code {rc}")

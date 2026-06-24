@@ -30,6 +30,9 @@ struct PyTrainParams {
     int num_threads = 0;  // 0 = use OMP_NUM_THREADS env var
     int pop_size = 0;     // 0 = default 100, max 500 (MEGE)
     int num_motifs = 0;   // 0 = default 20, capped by pop_size
+    int generations = 0;        // 0 = backend default
+    int mutation_attempts = 0;  // 0 = backend default
+    int stale_generations = 0;  // 0 = backend default
 
     // Internal storage for split paths (populated by to_c(), kept alive for C pointers)
     mutable std::string _fg_dir, _fg_file, _bg_dir, _bg_file;
@@ -71,6 +74,9 @@ struct PyTrainParams {
         p.verbose      = verbose;
         p.pop_size     = pop_size;
         p.num_motifs   = num_motifs;
+        p.generations = generations;
+        p.mutation_attempts = mutation_attempts;
+        p.stale_generations = stale_generations;
         return p;
     }
 };
@@ -95,7 +101,10 @@ PYBIND11_MODULE(sitega, m) {
         .def_readwrite("verbose",     &PyTrainParams::verbose)
         .def_readwrite("num_threads",  &PyTrainParams::num_threads)
         .def_readwrite("pop_size",     &PyTrainParams::pop_size)
-        .def_readwrite("num_motifs",   &PyTrainParams::num_motifs);
+        .def_readwrite("num_motifs",   &PyTrainParams::num_motifs)
+        .def_readwrite("generations",  &PyTrainParams::generations)
+        .def_readwrite("mutation_attempts", &PyTrainParams::mutation_attempts)
+        .def_readwrite("stale_generations", &PyTrainParams::stale_generations);
 
     // Convenience wrapper: train using TrainParams object
     m.def("train", [](const PyTrainParams& params) {
@@ -125,7 +134,8 @@ PYBIND11_MODULE(sitega, m) {
         const std::string& out_path, int max_peak_len,
         const std::string& log_file,
         unsigned long seed, int verbose,
-        int num_threads, int pop_size, int num_motifs
+        int num_threads, int pop_size, int num_motifs,
+        int generations, int mutation_attempts, int stale_generations
     ) {
         PyTrainParams p;
         p.fg_path = fg_path;
@@ -143,6 +153,9 @@ PYBIND11_MODULE(sitega, m) {
         p.num_threads = num_threads;
         p.pop_size = pop_size;
         p.num_motifs = num_motifs;
+        p.generations = generations;
+        p.mutation_attempts = mutation_attempts;
+        p.stale_generations = stale_generations;
         TrainParams cp = p.to_c();
 #ifdef _OPENMP
         if (num_threads > 0)
@@ -165,6 +178,9 @@ PYBIND11_MODULE(sitega, m) {
        py::arg("num_threads") = 0,
        py::arg("pop_size") = 0,
        py::arg("num_motifs") = 0,
+       py::arg("generations") = 0,
+       py::arg("mutation_attempts") = 0,
+       py::arg("stale_generations") = 0,
        "Train a SiteGA model with keyword arguments. "
        "Returns (rc, mat_path, loc_path, best_fit). rc=0 on success.");
 }

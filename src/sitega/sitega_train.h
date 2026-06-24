@@ -6,7 +6,8 @@ extern "C" {
 #endif
 
 /* Parameters for SiteGA model training.
- * Mirrors the CLI arguments of andy05cell.cpp.
+ * Mirrors the CLI arguments of andy05cell.cpp and adds backend-only tuning
+ * fields used by the Python wrapper.
  * fg_path / bg_path / out_path: directories ending with '/' (Linux) or '\\' (Windows).
  * fg_file / bg_file: foreground and background FASTA file names (relative to fg_path/bg_path).
  * log_file: output log file name (relative to out_path).
@@ -29,6 +30,9 @@ struct TrainParams {
     int verbose;            /* optional: 0 = summary only, 1 = per-individual detail */
     int pop_size;           /* optional: population size (0 = default 100, max 500) */
     int num_motifs;         /* optional: number of best motifs to write (0 = default 20, capped by pop_size) */
+    int generations;        /* optional: GA generations (0 = backend default) */
+    int mutation_attempts;  /* optional: mutations per candidate per generation (0 = backend default) */
+    int stale_generations;  /* optional: early stop after stale generations (0 = backend default) */
 };
 
 /* Result of SiteGA model training.

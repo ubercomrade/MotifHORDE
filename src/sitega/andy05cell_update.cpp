@@ -83,6 +83,9 @@ struct SearchConfig {
     int max_peak_len = 0;
     int pop_size = 0;
     int num_motifs = 0;
+    int generations = 0;
+    int mutation_attempts = 0;
+    int stale_generations = 0;
     bool verbose = false;
     uint64_t seed = 0;
 };
@@ -228,6 +231,9 @@ SearchConfig make_config(const TrainParams& params) {
     config.pop_size = std::min(config.pop_size, kMaxPopulation);
     config.num_motifs = params.num_motifs > 0 ? params.num_motifs : kDefaultNumMotifs;
     config.num_motifs = std::max(1, std::min(config.num_motifs, config.pop_size));
+    config.generations = params.generations;
+    config.mutation_attempts = params.mutation_attempts;
+    config.stale_generations = params.stale_generations;
     config.verbose = params.verbose != 0;
     config.seed = params.seed != 0
         ? static_cast<uint64_t>(params.seed)
@@ -265,6 +271,15 @@ void validate_config(const SearchConfig& config) {
     }
     if (config.pop_size <= 0 || config.pop_size > kMaxPopulation) {
         throw std::runtime_error("pop_size must be in 1..500");
+    }
+    if (config.generations < 0) {
+        throw std::runtime_error("generations must be non-negative");
+    }
+    if (config.mutation_attempts < 0) {
+        throw std::runtime_error("mutation_attempts must be non-negative");
+    }
+    if (config.stale_generations < 0) {
+        throw std::runtime_error("stale_generations must be non-negative");
     }
 }
 
@@ -1378,9 +1393,19 @@ void run_search(
     std::ostream& log
 ) {
     sort_population(population);
-    const int generations = std::max(6, std::min(24, 8 + config.motif_len / 2));
-    const int mutation_attempts = 3;
+    const int generations = config.generations > 0
+        ? config.generations
+        : std::max(6, std::min(24, 8 + config.motif_len / 2));
+    const int mutation_attempts = config.mutation_attempts > 0
+        ? config.mutation_attempts
+        : 3;
+    const int stale_generation_limit = config.stale_generations > 0
+        ? config.stale_generations
+        : 3;
     int stale_generations = 0;
+    log << "Search generations=" << generations
+        << " mutation_attempts=" << mutation_attempts
+        << " stale_generations=" << stale_generation_limit << '\n';
 
     for (int generation = 0; generation < generations; ++generation) {
         const double best_before = population.front().fit;
@@ -1470,7 +1495,7 @@ void run_search(
 
         if (improvement <= std::max(1e-9, std::fabs(best_before) * 1e-5)) {
             ++stale_generations;
-            if (stale_generations >= 3) {
+            if (stale_generations >= stale_generation_limit) {
                 break;
             }
         } else {
