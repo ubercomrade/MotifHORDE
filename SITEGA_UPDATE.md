@@ -101,7 +101,7 @@ API. Internal C++ code may use exceptions for unrecoverable validation or I/O
 errors, but they must be caught before crossing the C ABI and translated to an
 explicit non-zero status and Python-facing failure.
 
-If new options are needed, such as backend selection or `output_count`, add them
+If new options are needed, such as backend selection or `num_motifs`, add them
 as optional fields with zero/default values that preserve current behavior.
 Avoid changing the public Python return tuple until there is a clear need.
 
@@ -282,9 +282,12 @@ member. The Python wrapper usually consumes only the first few motifs.
 
 The new backend should support:
 
-- `output_count`;
-- default output count matching the requested motif count;
-- optional legacy mode that writes all population members.
+- `num_motifs` (number of best candidates written as motif files);
+- default of 20 motifs, capped by `pop_size`;
+- `pop_size` configurable through the Python wrapper (default 100, max 500).
+
+`num_motifs` and `pop_size` are passed explicitly via `TrainParams` from the
+Python wrapper; no environment variable is involved.
 
 This can remove a large amount of final scanning work.
 
@@ -386,8 +389,8 @@ Add the new backend without removing the old one:
 
 - keep old `sitega.train` behavior available;
 - expose an opt-in backend selector;
-- expose `output_count` only as an optional setting that defaults to legacy full
-  population output until the wrapper is ready to request fewer motifs;
+- expose `num_motifs` and `pop_size` via the Python wrapper as explicit
+  `TrainParams` fields (defaults: 20 motifs, population 100);
 - run both backends in CI on small deterministic data;
 - switch the default only after speed and result quality are documented.
 

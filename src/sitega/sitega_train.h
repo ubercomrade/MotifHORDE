@@ -27,7 +27,8 @@ struct TrainParams {
     const char* log_file;   /* arg 11: output log filename */
     unsigned long seed;     /* optional: RNG seed (0 = time(NULL)) */
     int verbose;            /* optional: 0 = summary only, 1 = per-individual detail */
-    int pop_size;           /* optional: population size (0 = default 100, max MEGE) */
+    int pop_size;           /* optional: population size (0 = default 100, max 500) */
+    int num_motifs;         /* optional: number of best motifs to write (0 = default 20, capped by pop_size) */
 };
 
 /* Result of SiteGA model training.

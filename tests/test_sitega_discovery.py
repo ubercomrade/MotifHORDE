@@ -71,6 +71,8 @@ def test_sitega_discovery_uses_returned_mat_path(monkeypatch, tmp_path):
             "log_file": "sitega.log",
             "num_threads": 0,
             "seed": 0,
+            "pop_size": 100,
+            "num_motifs": 20,
         }
     ]
     assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 4)]
@@ -198,6 +200,27 @@ def test_sitega_discovery_kwargs_seed_overrides_constructor_seed(monkeypatch, tm
     )
 
     assert calls[0]["seed"] == 456
+
+
+def test_sitega_discovery_real_backend_smoke(tmp_path):
+    pytest.importorskip("sitega")
+
+    output_dir = tmp_path / "sitega-output"
+    foreground = "tests/test_data/small_pipeline/foreground.fa"
+    background = "tests/test_data/small_pipeline/background.fa"
+
+    motifs = SitegaDiscoveryTool(seed=123).discover(
+        foreground,
+        background,
+        os.fspath(output_dir),
+        number_of_motifs=1,
+        length=8,
+        lpd=10,
+    )
+
+    assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 8)]
+    assert (output_dir / "foreground_mat1.mat").exists()
+    assert "Pipeline completed successfully!" in (output_dir / "sitega.log").read_text()
 
 
 def test_sitega_discovery_falls_back_to_glob_for_empty_mat_path(monkeypatch, tmp_path):

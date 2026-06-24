@@ -654,11 +654,17 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         nmotifs: int = 5,
         threads: int | None = None,
         seed: int | None = None,
+        pop_size: int = 100,
+        num_motifs: int = 20,
     ) -> None:
         super().__init__(name="sitega")
         self.nmotifs = nmotifs
         self.threads = threads
         self.seed = seed
+        # GA population size and number of motifs SiteGA writes to disk.
+        # Not exposed via CLI; fixed class-level defaults.
+        self.pop_size = pop_size
+        self.num_motifs = num_motifs
 
     def discover(
         self,
@@ -670,7 +676,8 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         **kwargs,
     ) -> List[GenericModel]:
         length = _require_length(kwargs)
-        number_of_lpd = int(kwargs.get("lpd", 20))
+        # SiteGA "size" = number of LPD features per motif candidate (CLI --lpd).
+        feature_count = int(kwargs.get("lpd", 20))
         seed = int(kwargs.get("seed", self.seed or 0))
         os.makedirs(output_dir, exist_ok=True)
 
@@ -681,7 +688,7 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
             bg_path=background,
             max_lpd=6,
             motif_len=length,
-            size=number_of_lpd,
+            size=feature_count,
             olig_bg=6,
             infc=1,
             out_path=output_dir + os.sep,
@@ -689,6 +696,8 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
             log_file="sitega.log",
             num_threads=self.threads or 0,
             seed=seed,
+            pop_size=self.pop_size,
+            num_motifs=self.num_motifs,
         )
         if rc != 0:
             raise RuntimeError(f"SiteGA training failed with return code {rc}")
