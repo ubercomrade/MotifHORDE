@@ -689,7 +689,7 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         nmotifs: int = 5,
         threads: int | None = None,
         seed: int | None = None,
-        pop_size: int = 50,
+        pop_size: int = 30,
         num_motifs: int = 20,
         generations: int | None = 50,
         mutation_attempts: int | None = 50,

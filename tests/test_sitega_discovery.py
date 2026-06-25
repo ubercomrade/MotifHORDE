@@ -71,11 +71,11 @@ def test_sitega_discovery_uses_returned_mat_path(monkeypatch, tmp_path):
             "log_file": "sitega.log",
             "num_threads": 0,
             "seed": 0,
-            "pop_size": 500,
+            "pop_size": 50,
             "num_motifs": 20,
-            "generations": 0,
-            "mutation_attempts": 0,
-            "stale_generations": 0,
+            "generations": 50,
+            "mutation_attempts": 50,
+            "stale_generations": 10,
         }
     ]
     assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 4)]
@@ -331,7 +331,9 @@ def test_sitega_discovery_real_backend_smoke(tmp_path):
 
     assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 8)]
     assert (output_dir / "foreground_mat1.mat").exists()
-    assert "Pipeline completed successfully!" in (output_dir / "sitega.log").read_text()
+    log_text = (output_dir / "sitega.log").read_text()
+    assert "Feature pool size=" in log_text
+    assert "Pipeline completed successfully!" in log_text
 
 
 def test_sitega_discovery_falls_back_to_glob_for_empty_mat_path(monkeypatch, tmp_path):

@@ -32,6 +32,11 @@ constexpr int kDefaultPopulation = 100;
 constexpr int kDefaultNumMotifs = 20;
 constexpr double kMinPivot = 1e-12;
 constexpr double kScoreEpsilon = 1e-12;
+constexpr double kFeatureScoreRidge = 1e-9;
+constexpr int kDirectedFeatureAttempts = 64;
+constexpr int kFeaturePoolTopMultiplier = 12;
+constexpr int kPlacementRefineSequenceLimit = 32;
+constexpr int kPlacementRefineSamples = 12;
 
 using PrefixRow = std::array<int, kPrefixSlots>;
 using PrefixTable = std::vector<PrefixRow>;
@@ -116,6 +121,15 @@ struct Feature {
     int code = 0;
 };
 
+struct FeaturePoolEntry {
+    Feature feature;
+    double score = 0.0;
+    double signed_effect = 0.0;
+    double fg_mean = 0.0;
+    double bg_mean = 0.0;
+    double variance = 0.0;
+};
+
 struct Candidate {
     std::vector<Feature> features;
     std::vector<int> positions;
@@ -136,6 +150,12 @@ struct ModelWeights {
     double minimum = 0.0;
     double range = 1.0;
 };
+
+ModelWeights model_weights_from_stats(
+    const Candidate& candidate,
+    const EncodedSequences& sequences,
+    const BackgroundStats& background
+);
 
 int base_code(char nucleotide) {
     switch (nucleotide) {
@@ -401,6 +421,35 @@ bool interval_has_invalid(const PrefixTable& prefix, int start, int end) {
     ) > 0;
 }
 
+bool feature_value_for_placement(
+    const Feature& feature,
+    const EncodedSequence& sequence,
+    int position,
+    unsigned char orientation,
+    double& value
+) {
+    const auto strand = static_cast<std::size_t>(orientation);
+    if (strand >= sequence.prefixes.size()) {
+        return false;
+    }
+
+    const int start = position + feature.start;
+    const int end = position + feature.end;
+    const auto& prefix = sequence.prefixes[strand];
+    if (start < 0 ||
+        end < start ||
+        static_cast<std::size_t>(end + 1) >= prefix.size()) {
+        return false;
+    }
+    if (interval_has_invalid(prefix, start, end)) {
+        return false;
+    }
+
+    value = static_cast<double>(interval_count(prefix, feature.code, start, end)) /
+        static_cast<double>(feature.end - feature.start + 1);
+    return true;
+}
+
 int kmer_code_at(const std::string& sequence, int start, int kmer_len) {
     int code = 0;
     for (int offset = 0; offset < kmer_len; ++offset) {
@@ -643,6 +692,119 @@ BackgroundStats build_background_stats(
     return stats;
 }
 
+std::vector<FeaturePoolEntry> build_feature_pool(
+    const EncodedSequences& sequences,
+    const BackgroundStats& background,
+    const SearchConfig& config
+) {
+    std::vector<FeaturePoolEntry> pool;
+    const int motif_dinuc_count = config.motif_len - 1;
+    pool.reserve(
+        static_cast<std::size_t>(
+            kDinucleotideCount * motif_dinuc_count * config.max_lpd
+        )
+    );
+
+    for (int code = 0; code < kDinucleotideCount; ++code) {
+        for (int start = 0; start < motif_dinuc_count; ++start) {
+            const int max_end = std::min(
+                start + config.max_lpd - 1,
+                motif_dinuc_count - 1
+            );
+            for (int end = start; end <= max_end; ++end) {
+                const Feature feature{start, end, code};
+                double fg_sum = 0.0;
+                double fg_second = 0.0;
+                int sequence_count = 0;
+
+                for (const auto& sequence : sequences.records) {
+                    double sequence_sum = 0.0;
+                    int placement_count = 0;
+                    for (int position : sequence.candidate_positions) {
+                        for (unsigned char orientation = 0;
+                             orientation < 2;
+                             ++orientation) {
+                            double value = 0.0;
+                            if (feature_value_for_placement(
+                                    feature,
+                                    sequence,
+                                    position,
+                                    orientation,
+                                    value
+                                )) {
+                                sequence_sum += value;
+                                ++placement_count;
+                            }
+                        }
+                    }
+                    if (placement_count == 0) {
+                        continue;
+                    }
+
+                    const double sequence_mean =
+                        sequence_sum / static_cast<double>(placement_count);
+                    fg_sum += sequence_mean;
+                    fg_second += sequence_mean * sequence_mean;
+                    ++sequence_count;
+                }
+
+                if (sequence_count == 0) {
+                    continue;
+                }
+
+                const double fg_mean = fg_sum / static_cast<double>(sequence_count);
+                double fg_variance =
+                    fg_second / static_cast<double>(sequence_count) -
+                    fg_mean * fg_mean;
+                fg_variance = std::max(0.0, fg_variance);
+
+                const int span = end - start;
+                const double bg_mean = background.mean[static_cast<std::size_t>(span)]
+                    [static_cast<std::size_t>(code)];
+                const double bg_variance = std::max(
+                    0.0,
+                    background.covariance[static_cast<std::size_t>(span)]
+                        [static_cast<std::size_t>(code)]
+                );
+                const double diff = fg_mean - bg_mean;
+                const double variance = fg_variance + bg_variance + kFeatureScoreRidge;
+                const double score = diff * diff / variance;
+                const double signed_effect = diff / variance;
+                if (!std::isfinite(score) || !std::isfinite(signed_effect)) {
+                    continue;
+                }
+
+                pool.push_back({
+                    feature,
+                    score,
+                    signed_effect,
+                    fg_mean,
+                    bg_mean,
+                    variance,
+                });
+            }
+        }
+    }
+
+    std::sort(
+        pool.begin(),
+        pool.end(),
+        [](const FeaturePoolEntry& lhs, const FeaturePoolEntry& rhs) {
+            if (lhs.score != rhs.score) {
+                return lhs.score > rhs.score;
+            }
+            if (lhs.feature.code != rhs.feature.code) {
+                return lhs.feature.code < rhs.feature.code;
+            }
+            if (lhs.feature.start != rhs.feature.start) {
+                return lhs.feature.start < rhs.feature.start;
+            }
+            return lhs.feature.end < rhs.feature.end;
+        }
+    );
+    return pool;
+}
+
 bool feature_less(const Feature& lhs, const Feature& rhs) {
     if (lhs.code != rhs.code) {
         return lhs.code < rhs.code;
@@ -651,6 +813,10 @@ bool feature_less(const Feature& lhs, const Feature& rhs) {
         return lhs.start < rhs.start;
     }
     return lhs.end < rhs.end;
+}
+
+bool same_feature(const Feature& lhs, const Feature& rhs) {
+    return lhs.start == rhs.start && lhs.end == rhs.end && lhs.code == rhs.code;
 }
 
 void sort_features(Candidate& candidate) {
@@ -712,9 +878,7 @@ bool same_candidate(const Candidate& lhs, const Candidate& rhs) {
     for (std::size_t index = 0; index < lhs.features.size(); ++index) {
         const auto& left = lhs.features[index];
         const auto& right = rhs.features[index];
-        if (left.start != right.start ||
-            left.end != right.end ||
-            left.code != right.code) {
+        if (!same_feature(left, right)) {
             return false;
         }
     }
@@ -843,22 +1007,22 @@ int feature_values_for_placement(
     unsigned char orientation,
     std::vector<double>& values
 ) {
-    const auto strand = static_cast<std::size_t>(orientation);
-    const auto& prefix = sequence.prefixes[strand];
     values.assign(candidate.features.size(), 0.0);
     int invalid_count = 0;
 
     for (std::size_t index = 0; index < candidate.features.size(); ++index) {
-        const auto& feature = candidate.features[index];
-        const int start = position + feature.start;
-        const int end = position + feature.end;
-        if (interval_has_invalid(prefix, start, end)) {
+        double value = 0.0;
+        if (!feature_value_for_placement(
+                candidate.features[index],
+                sequence,
+                position,
+                orientation,
+                value
+            )) {
             ++invalid_count;
             continue;
         }
-        const int count = interval_count(prefix, feature.code, start, end);
-        values[index] = static_cast<double>(count) /
-            static_cast<double>(feature.end - feature.start + 1);
+        values[index] = value;
     }
     return invalid_count;
 }
@@ -1293,6 +1457,292 @@ bool try_placement_mutation(
     return false;
 }
 
+double placement_model_score(
+    const std::vector<double>& values,
+    const ModelWeights& weights
+) {
+    double score = 0.0;
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        score += weights.values[index] * values[index];
+    }
+    return (score - weights.minimum) / weights.range;
+}
+
+std::vector<int> refinement_sequence_indices(
+    const Candidate& candidate,
+    const EncodedSequences& sequences,
+    Rng& rng
+) {
+    const int sequence_count = static_cast<int>(sequences.records.size());
+    std::vector<int> indices;
+    std::vector<int> optional_indices;
+    indices.reserve(static_cast<std::size_t>(sequence_count));
+    optional_indices.reserve(static_cast<std::size_t>(sequence_count));
+
+    std::vector<double> values;
+    for (int index = 0; index < sequence_count; ++index) {
+        const auto& sequence = sequences.records[static_cast<std::size_t>(index)];
+        const int invalid_count = feature_values_for_placement(
+            candidate,
+            sequence,
+            candidate.positions[static_cast<std::size_t>(index)],
+            candidate.orientations[static_cast<std::size_t>(index)],
+            values
+        );
+        if (invalid_count > 0) {
+            indices.push_back(index);
+        } else {
+            optional_indices.push_back(index);
+        }
+    }
+
+    const int extra_count = std::min(
+        kPlacementRefineSequenceLimit,
+        static_cast<int>(optional_indices.size())
+    );
+    for (int index = 0; index < extra_count; ++index) {
+        const int chosen = index + rng.range(
+            static_cast<int>(optional_indices.size()) - index
+        );
+        std::swap(optional_indices[static_cast<std::size_t>(index)],
+                  optional_indices[static_cast<std::size_t>(chosen)]);
+        indices.push_back(optional_indices[static_cast<std::size_t>(index)]);
+    }
+
+    return indices;
+}
+
+bool choose_kmer_refined_placement(
+    Candidate& candidate,
+    const EncodedSequence& sequence,
+    const SearchConfig& config,
+    int sequence_index,
+    Rng& rng
+) {
+    const auto slot = static_cast<std::size_t>(sequence_index);
+    const int old_position = candidate.positions[slot];
+    const auto old_orientation = candidate.orientations[slot];
+    int best_position = old_position;
+    unsigned char best_orientation = old_orientation;
+    double best_score = 0.0;
+    bool found = false;
+    std::vector<double> values;
+
+    const auto consider = [&](int position, unsigned char orientation) {
+        if (feature_values_for_placement(
+                candidate,
+                sequence,
+                position,
+                orientation,
+                values
+            ) > 0) {
+            return;
+        }
+        const double score = placement_kmer_weight(
+            sequence,
+            config.motif_len,
+            position,
+            orientation
+        );
+        if (!found || score > best_score) {
+            found = true;
+            best_score = score;
+            best_position = position;
+            best_orientation = orientation;
+        }
+    };
+
+    consider(old_position, old_orientation);
+    consider(old_position, static_cast<unsigned char>(1 - old_orientation));
+    for (int sample = 0; sample < kPlacementRefineSamples; ++sample) {
+        const int position = sample_weighted_position(sequence, rng);
+        consider(position, 0);
+        consider(position, 1);
+    }
+
+    if (!found ||
+        (best_position == old_position && best_orientation == old_orientation)) {
+        return false;
+    }
+    candidate.positions[slot] = best_position;
+    candidate.orientations[slot] = best_orientation;
+    return true;
+}
+
+bool choose_model_refined_placement(
+    Candidate& candidate,
+    const EncodedSequence& sequence,
+    const ModelWeights& weights,
+    int sequence_index,
+    Rng& rng
+) {
+    const auto slot = static_cast<std::size_t>(sequence_index);
+    const int old_position = candidate.positions[slot];
+    const auto old_orientation = candidate.orientations[slot];
+    int best_position = old_position;
+    unsigned char best_orientation = old_orientation;
+    double best_score = 0.0;
+    bool found = false;
+    std::vector<double> values;
+
+    const auto consider = [&](int position, unsigned char orientation) {
+        if (feature_values_for_placement(
+                candidate,
+                sequence,
+                position,
+                orientation,
+                values
+            ) > 0) {
+            return;
+        }
+        const double score = placement_model_score(values, weights);
+        if (!found || score > best_score) {
+            found = true;
+            best_score = score;
+            best_position = position;
+            best_orientation = orientation;
+        }
+    };
+
+    consider(old_position, old_orientation);
+    consider(old_position, static_cast<unsigned char>(1 - old_orientation));
+    for (int sample = 0; sample < kPlacementRefineSamples; ++sample) {
+        const int position = sample_weighted_position(sequence, rng);
+        consider(position, 0);
+        consider(position, 1);
+    }
+
+    if (!found ||
+        (best_position == old_position && best_orientation == old_orientation)) {
+        return false;
+    }
+    candidate.positions[slot] = best_position;
+    candidate.orientations[slot] = best_orientation;
+    return true;
+}
+
+void refine_placements_after_feature_change(
+    Candidate& candidate,
+    const EncodedSequences& sequences,
+    const BackgroundStats& background,
+    const SearchConfig& config,
+    Rng& rng
+) {
+    recompute_candidate_stats(candidate, sequences, background, config);
+    const auto sequence_indices = refinement_sequence_indices(
+        candidate,
+        sequences,
+        rng
+    );
+
+    if (candidate.invalid_intervals > 0) {
+        bool repaired = false;
+        for (int sequence_index : sequence_indices) {
+            repaired = choose_kmer_refined_placement(
+                candidate,
+                sequences.records[static_cast<std::size_t>(sequence_index)],
+                config,
+                sequence_index,
+                rng
+            ) || repaired;
+        }
+        if (repaired) {
+            recompute_candidate_stats(candidate, sequences, background, config);
+        }
+        if (candidate.invalid_intervals > 0) {
+            return;
+        }
+    }
+
+    const auto weights = model_weights_from_stats(candidate, sequences, background);
+    bool refined = false;
+    for (int sequence_index : sequence_indices) {
+        refined = choose_model_refined_placement(
+            candidate,
+            sequences.records[static_cast<std::size_t>(sequence_index)],
+            weights,
+            sequence_index,
+            rng
+        ) || refined;
+    }
+    if (refined) {
+        recompute_candidate_stats(candidate, sequences, background, config);
+    }
+}
+
+bool try_directed_feature_replacement(
+    Candidate& candidate,
+    const std::vector<Candidate>& population,
+    int population_index,
+    const std::vector<FeaturePoolEntry>& feature_pool,
+    const EncodedSequences& sequences,
+    const BackgroundStats& background,
+    const SearchConfig& config,
+    Rng& rng
+) {
+    if (feature_pool.empty() || candidate.features.empty()) {
+        return false;
+    }
+
+    const auto pool_limit = std::min(
+        feature_pool.size(),
+        static_cast<std::size_t>(
+            std::max(
+                config.feature_count * kFeaturePoolTopMultiplier,
+                config.feature_count
+            )
+        )
+    );
+    const int feature_index = rng.range(static_cast<int>(candidate.features.size()));
+    const double old_fit = candidate.fit;
+    const auto old_features = candidate.features;
+    const auto old_positions = candidate.positions;
+    const auto old_orientations = candidate.orientations;
+    const uint64_t old_fingerprint = candidate.fingerprint;
+
+    for (int attempt = 0; attempt < kDirectedFeatureAttempts; ++attempt) {
+        const int pool_index = rng.range(static_cast<int>(pool_limit));
+        const auto& proposed =
+            feature_pool[static_cast<std::size_t>(pool_index)].feature;
+        if (same_feature(
+                candidate.features[static_cast<std::size_t>(feature_index)],
+                proposed
+            )) {
+            continue;
+        }
+        if (!can_use_feature(candidate.features, proposed, feature_index)) {
+            continue;
+        }
+
+        candidate.features[static_cast<std::size_t>(feature_index)] = proposed;
+        sort_features(candidate);
+        candidate.stats_valid = false;
+        refine_placements_after_feature_change(
+            candidate,
+            sequences,
+            background,
+            config,
+            rng
+        );
+
+        const bool accept = candidate.fit > old_fit + kScoreEpsilon &&
+            !duplicate_candidate(candidate, population, population_index);
+        if (accept) {
+            return true;
+        }
+
+        candidate.features = old_features;
+        candidate.positions = old_positions;
+        candidate.orientations = old_orientations;
+        candidate.fingerprint = old_fingerprint;
+        candidate.stats_valid = false;
+        recompute_candidate_stats(candidate, sequences, background, config);
+        return false;
+    }
+
+    return false;
+}
+
 bool valid_feature_set(const std::vector<Feature>& features) {
     for (std::size_t index = 0; index < features.size(); ++index) {
         if (!can_use_feature(features, features[index], static_cast<int>(index))) {
@@ -1386,6 +1836,7 @@ void sort_population(std::vector<Candidate>& population) {
 
 void run_search(
     std::vector<Candidate>& population,
+    const std::vector<FeaturePoolEntry>& feature_pool,
     const EncodedSequences& sequences,
     const BackgroundStats& background,
     const SearchConfig& config,
@@ -1402,6 +1853,7 @@ void run_search(
     const int stale_generation_limit = config.stale_generations > 0
         ? config.stale_generations
         : 3;
+    const int mutation_type_count = feature_pool.empty() ? 3 : 4;
     int stale_generations = 0;
     log << "Search generations=" << generations
         << " mutation_attempts=" << mutation_attempts
@@ -1410,11 +1862,12 @@ void run_search(
     for (int generation = 0; generation < generations; ++generation) {
         const double best_before = population.front().fit;
         int accepted_mutations = 0;
+        int accepted_directed_mutations = 0;
         int accepted_recombinations = 0;
 
         for (std::size_t index = 0; index < population.size(); ++index) {
             for (int attempt = 0; attempt < mutation_attempts; ++attempt) {
-                const int type = rng.range(3);
+                const int type = rng.range(mutation_type_count);
                 bool accepted = false;
                 if (type == 0) {
                     accepted = try_feature_mutation(
@@ -1438,7 +1891,7 @@ void run_search(
                         rng,
                         false
                     );
-                } else {
+                } else if (type == 2) {
                     accepted = try_placement_mutation(
                         population[index],
                         population,
@@ -1448,9 +1901,24 @@ void run_search(
                         config,
                         rng
                     );
+                } else {
+                    accepted = try_directed_feature_replacement(
+                        population[index],
+                        population,
+                        static_cast<int>(index),
+                        feature_pool,
+                        sequences,
+                        background,
+                        config,
+                        rng
+                    );
                 }
                 if (accepted) {
-                    ++accepted_mutations;
+                    if (type == 3) {
+                        ++accepted_directed_mutations;
+                    } else {
+                        ++accepted_mutations;
+                    }
                 }
             }
         }
@@ -1490,6 +1958,7 @@ void run_search(
         log << "Gen " << (generation + 1)
             << " Fit " << std::setprecision(8) << population.front().fit
             << " Mut " << accepted_mutations
+            << " Dir " << accepted_directed_mutations
             << " Rec " << accepted_recombinations
             << " Delta " << improvement << '\n';
 
@@ -1504,13 +1973,11 @@ void run_search(
     }
 }
 
-ModelWeights compute_model_weights(
-    Candidate& candidate,
+ModelWeights model_weights_from_stats(
+    const Candidate& candidate,
     const EncodedSequences& sequences,
-    const BackgroundStats& background,
-    const SearchConfig& config
+    const BackgroundStats& background
 ) {
-    recompute_candidate_stats(candidate, sequences, background, config);
     ModelWeights weights;
     const int feature_count = static_cast<int>(candidate.features.size());
     weights.values.assign(static_cast<std::size_t>(feature_count), 0.0);
@@ -1589,6 +2056,16 @@ ModelWeights compute_model_weights(
     return weights;
 }
 
+ModelWeights compute_model_weights(
+    Candidate& candidate,
+    const EncodedSequences& sequences,
+    const BackgroundStats& background,
+    const SearchConfig& config
+) {
+    recompute_candidate_stats(candidate, sequences, background, config);
+    return model_weights_from_stats(candidate, sequences, background);
+}
+
 void write_matrix(
     const std::string& path,
     const Candidate& candidate,
@@ -1619,18 +2096,22 @@ void write_matrix(
 }
 
 double output_feature_value(
-    const Candidate& candidate,
-    const EncodedSequence& sequence,
     const Feature& feature,
+    const EncodedSequence& sequence,
     int position,
     unsigned char orientation
 ) {
-    (void)candidate;
-    const auto& prefix = sequence.prefixes[static_cast<std::size_t>(orientation)];
-    const int start = position + feature.start;
-    const int end = position + feature.end;
-    return static_cast<double>(interval_count(prefix, feature.code, start, end)) /
-        static_cast<double>(feature.end - feature.start + 1);
+    double value = 0.0;
+    if (!feature_value_for_placement(
+            feature,
+            sequence,
+            position,
+            orientation,
+            value
+        )) {
+        return 0.0;
+    }
+    return value;
 }
 
 double score_window(
@@ -1643,9 +2124,8 @@ double score_window(
     double score = 0.0;
     for (std::size_t index = 0; index < candidate.features.size(); ++index) {
         score += weights.values[index] * output_feature_value(
-            candidate,
-            sequence,
             candidate.features[index],
+            sequence,
             position,
             orientation
         );
@@ -1831,9 +2311,15 @@ int train_impl(const TrainParams& params, TrainResult* result) {
         }
     }
 
+    auto feature_pool = build_feature_pool(encoded, background, config);
+    log << "Feature pool size=" << feature_pool.size()
+        << " best_score="
+        << (feature_pool.empty() ? 0.0 : feature_pool.front().score)
+        << '\n';
+
     Rng rng(config.seed);
     auto population = initialize_population(encoded, background, config, rng, log);
-    run_search(population, encoded, background, config, rng, log);
+    run_search(population, feature_pool, encoded, background, config, rng, log);
     sort_population(population);
     write_outputs(population, encoded, background, config, result);
     log << "Pipeline completed successfully!\n";
