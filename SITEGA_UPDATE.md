@@ -1,451 +1,510 @@
-# SiteGA Rewrite and Optimization Plan
+# Plan: directed SiteGA feature selection
 
-This document proposes how to speed up the SiteGA implementation. The key
-recommendation is not to keep patching `src/sitega/andy05cell.cpp` in place.
-The current file is old C-style C++ with global state, fixed-size arrays,
-manual memory management, mixed I/O and computation, and several correctness
-risks. Substantial optimization inside that file will make it harder to verify
-and maintain.
+## Scope
 
-The safer approach is to keep the current implementation as a reference and
-write a new, cleanly designed implementation next to it. The new implementation
-must be compared against the current one for both output quality and runtime
-before it replaces the existing backend.
+This plan covers only internal feature selection in
+`src/sitega/andy05cell_update.cpp`.
 
-## Goals
+Model/search hyperparameters remain external:
 
-The rewrite should optimize for:
+- `motif_len`
+- `max_lpd`
+- `size` / `feature_count`
+- `olig_bg`
+- `pop_size`
+- `generations`
+- `mutation_attempts`
+- `stale_generations`
 
-- correctness first;
-- reproducible results with a fixed seed;
-- clear data flow and isolated side effects;
-- simpler structures instead of global mutable state;
-- faster single-threaded execution;
-- measurable parity with the current implementation;
-- maintainability rather than local micro-optimizations.
+The target is to improve how the algorithm chooses model features
+`Feature{start, end, code}` and how motif placements are adjusted after those
+features change.
 
-The rewrite should not use OpenMP or other parallel execution as the primary
-speedup path.
+The first implementation should keep the existing random mutations and
+recombination. The new logic should be added as one extra directed search path,
+so behavior remains easy to compare and roll back.
 
-## Why Not Patch the Existing File
+## Current Weak Point
 
-`andy05cell.cpp` mixes many responsibilities in one file:
+The current implementation has a directed fitness function, but feature
+proposals are mostly random:
 
-- FASTA parsing;
-- sequence encoding;
-- background statistics;
-- position weighting;
-- population initialization;
-- mutation and recombination;
-- fitness evaluation;
-- matrix inversion;
-- logging;
-- output file generation;
-- Python-facing training behavior.
+- `make_random_candidate` samples feature `code`, `start`, and `end` randomly.
+- `mutate_feature_code` randomly replaces only the dinucleotide code.
+- `mutate_feature_interval` randomly replaces only the interval.
+- A feature mutation is evaluated against the candidate's current
+  `positions`/`orientations`.
 
-The hot path depends on global arrays and mutable `town` objects. Most candidate
-changes copy full per-sequence placement arrays and then recompute fitness from
-scratch. This makes local optimization risky: a small change can alter the
-search trajectory, change RNG usage, or hide a bug behind faster execution.
+This means a good feature can be rejected when the current placements are poor.
+It also means many mutation attempts are spent on features that foreground and
+background data already suggest are weak.
 
-The current code should remain available as:
+## Intended Direction
 
-- a reference implementation;
-- a regression oracle for fixed seeds and small datasets;
-- a fallback backend while the new implementation is validated.
+Add two cooperating mechanisms:
 
-## Proposed Architecture
+1. Precompute a ranked pool of all possible features from foreground/background
+   statistics.
+2. Add a directed feature replacement mutation that immediately performs a
+   short placement refinement before accepting or rejecting the new feature set.
 
-Create a new SiteGA backend with small, explicit modules:
-
-- input parsing and validation;
-- sequence encoding;
-- background statistics;
-- k-mer position scoring;
-- candidate representation;
-- fitness evaluation;
-- mutation operators;
-- recombination operators;
-- search loop;
-- output formatting.
-
-Keep the public Python API stable. The Python wrapper can later select the new
-backend by default after parity and speed are demonstrated.
-
-Suggested C++ structures:
-
-- `EncodedSequences`: owns forward and reverse dinucleotide arrays, lengths,
-  and optional prefix-count tables.
-- `BackgroundStats`: owns `dav`, `dcv`, `pexp`, and k-mer log-ratio tables.
-- `PositionWeights`: owns selected candidate positions and cumulative weights
-  per sequence.
-- `Feature`: replacement for `uno`, storing `start`, `end`, and dinucleotide
-  code.
-- `Candidate`: replacement for `town`, storing features, sequence placements,
-  cached score components, and a fingerprint.
-- `FitnessWorkspace`: reusable temporary buffers for covariance, feature
-  vectors, and linear solves.
-- `SearchConfig`: simple configuration structure derived from `TrainParams`.
-
-Use plain structs and vectors. Avoid speculative class hierarchies and service
-objects.
-
-The current extension is built through `setuptools` and `Pybind11Extension` with
-C++17. Do not add CMake, C++20-only features, or a second build system unless a
-separate tooling decision justifies that cost. Keep the rewrite compatible with
-the existing package build first; build-system migration is outside the critical
-path for making SiteGA correct and faster.
-
-The C-facing `sitega_train()` boundary should remain a small status-returning
-API. Internal C++ code may use exceptions for unrecoverable validation or I/O
-errors, but they must be caught before crossing the C ABI and translated to an
-explicit non-zero status and Python-facing failure.
-
-If new options are needed, such as backend selection or `num_motifs`, add them
-as optional fields with zero/default values that preserve current behavior.
-Avoid changing the public Python return tuple until there is a clear need.
-
-## Build and Tooling Requirements
-
-Before relying on the new backend, add a debug/test build path for the extension:
-
-- normal release builds should keep using optimized `-O3` settings;
-- development builds should enable at least `-Wall`, `-Wextra`, and
-  `-Wpedantic` where supported;
-- sanitizer builds should be available for AddressSanitizer and
-  UndefinedBehaviorSanitizer;
-- sanitizer failures and compiler warnings in changed C++ code should be fixed,
-  not documented as acceptable;
-- OpenMP should remain optional and should not be required for correctness or
-  the main speedup claim.
-
-These checks should be wired into the existing setuptools/pybind11 workflow
-unless the project later chooses a broader build-system migration.
-
-## Correctness Fixes to Carry Into the Rewrite
-
-The new implementation should intentionally decide how to handle these current
-issues:
-
-- In final scoring, `EvalMahFITTrain()` omits `f1[k] /= nseq` before covariance
-  and `df` computation. The nearby `df[k] /= nseq` divides a zero-initialized
-  array and has no useful effect. This should be fixed and covered by a test.
-- The `infc` parameter computes an information-content value, but that value
-  is not used in the current final fitness. The rewrite must either preserve
-  current behavior explicitly or implement the intended behavior behind a
-  controlled option.
-- Weighted position selection is weakened by `dw = maxw` where the code likely
-  intended `maxw = dw`. The rewrite should preserve this only in
-  `legacy_compat`; corrected mode should implement the intended weighting and
-  compare the effect.
-- Position sampling currently uses forward-coordinate high-scoring windows even
-  when `ori == 1`; only the `fpr` lookup mirrors the reverse-strand position
-  back to forward coordinates. The rewrite should either preserve this in
-  `legacy_compat` or intentionally switch to strand-consistent sampling.
-- Recombination duplicate checks should use the actual shuffled parent indices
-  from `pair_d[pair_take[k]]`, not stale pair-list indices from `pair_d[k]`.
-- `Reco2_Two_dinucleotides_full()` appears to update `odg[]` with group-relative
-  indices instead of offsets for the selected dinucleotide groups. This should
-  be repaired or intentionally excluded from compatibility-sensitive paths.
-- Validate `motif_len`, `max_lpd`, `size`, `olig_bg`, sequence lengths, and
-  population size before allocation. Validation should include current fixed
-  limits such as `motif_len <= MOTLEN`, `max_lpd <= LPDLEN`,
-  `size <= POPSIZE`, `size <= 16 * (motif_len - 1)`, `olig_bg <= motif_len`,
-  and enough candidate motif windows to select a valid top-third threshold.
-- Track invalid dinucleotide intervals explicitly. Current training fitness
-  returns zero if any selected LPD interval contains `-1`; the rewrite should
-  preserve or intentionally replace that behavior with tests.
-- Replace `exit(1)` inside library code with explicit error returns or
-  exceptions caught before the C ABI boundary and translated into Python-visible
-  failures.
-
-## Main Speedup Opportunities
-
-Do the speedups in stages. First make a compatible full-fitness implementation
-that can be compared against fixed candidates from the old backend. Add
-incremental fitness and rollback only after that full recomputation path is
-tested, because those optimizations make cache invalidation and search-trajectory
-bugs much harder to isolate.
-
-### 1. Incremental Fitness for Placement Mutations
-
-The hottest mutation, `MutRegShiftHoxaW`, changes one sequence placement:
-
-- one sequence index;
-- its motif start;
-- possibly its strand.
-
-The current code recomputes the full fitness over all sequences after this
-change. The rewrite should cache each candidate's contribution sums:
-
-- feature mean sums;
-- covariance second-moment sums;
-- optional positional information-content counts;
-- k-mer score sum.
-
-For a placement mutation, update the cached state by subtracting the old
-sequence contribution and adding the new one. This changes the cost from roughly
-O(`nseq * feature_count * lpd_length`) to O(`feature_count * lpd_length`) plus
-the matrix solve.
-
-This is likely the largest single-threaded speedup.
-
-This should not be the first implementation target. It depends on a correct
-candidate state model, a validated full recomputation path, and tests that prove
-the cached state matches a fresh recomputation after accepted and rejected
-mutations.
-
-### 2. Prefix Counts for LPD Feature Values
-
-Feature values are currently computed by scanning every dinucleotide in each LPD
-interval. Precompute per-sequence, per-strand prefix counts for the 16
-dinucleotide codes:
+The combined flow should be:
 
 ```text
-count(code, start, end) =
-    prefix[code][end + 1] - prefix[code][start]
+encoded foreground + background stats
+    -> ranked feature pool
+    -> replace one candidate feature from the pool
+    -> repair/refine placements for the changed feature set
+    -> recompute final fitness
+    -> accept only if fit improves and candidate is not duplicated
 ```
 
-Then each LPD feature value is O(1). This speeds up:
+## New Data Structures
 
-- full fitness recomputation;
-- incremental placement updates;
-- final location scanning;
-- output model scoring.
+Add a small score wrapper near `Feature`.
 
-Memory cost is predictable: `2 * nseq * (len - 1) * 16` counters. If this is too
-large for long peaks, use compact integer types or build prefix tables per
-sequence.
+```cpp
+struct FeaturePoolEntry {
+    Feature feature;
+    double score = 0.0;
+    double signed_effect = 0.0;
+    double fg_mean = 0.0;
+    double bg_mean = 0.0;
+    double variance = 0.0;
+};
+```
 
-### 3. Avoid Full Matrix Inversion
+Keep this as a simple struct. Do not introduce a class, registry, or separate
+service object.
 
-Fitness needs:
+Recommended internal constants:
+
+```cpp
+constexpr double kFeatureScoreRidge = 1e-9;
+constexpr int kDirectedFeatureAttempts = 64;
+constexpr int kFeaturePoolTopMultiplier = 12;
+constexpr int kPlacementRefineSequenceLimit = 32;
+constexpr int kPlacementRefineSamples = 12;
+```
+
+These are search-budget constants, not public model hyperparameters. Keep them
+local to this backend unless later evidence shows they need to be configurable.
+
+## Feature Pool Construction
+
+Add `build_feature_pool` after `build_background_stats` or near the other
+feature helper functions.
+
+Suggested signature:
+
+```cpp
+std::vector<FeaturePoolEntry> build_feature_pool(
+    const EncodedSequences& sequences,
+    const BackgroundStats& background,
+    const SearchConfig& config
+);
+```
+
+Enumeration:
 
 ```text
-mah = df^T * covariance^-1 * df
+for code in 0..15
+for start in 0..motif_len - 2
+for end in start..min(start + max_lpd - 1, motif_len - 2)
 ```
 
-It does not need the full inverse matrix. Solve:
+For each feature, estimate foreground statistics over plausible foreground
+windows:
+
+- Use each sequence's existing `candidate_positions`.
+- Evaluate both orientations.
+- Use the same placement coordinate convention as the current candidate code:
+  for reverse orientation, `position` is a coordinate on `sequence.reverse`.
+- Skip invalid intervals.
+- Normalize per sequence before averaging globally, so longer sequences do not
+  dominate the pool score.
+
+A practical foreground statistic:
 
 ```text
-covariance * x = df
-mah = df^T * x
+sequence_mean = average feature value across valid candidate placements
+fg_mean = average sequence_mean across sequences with at least one valid placement
+fg_var = variance of sequence_mean
 ```
 
-Use a small dense linear solver:
+Use background statistics already computed by `build_background_stats`:
 
-- Cholesky or LDLT when the covariance matrix is positive definite enough;
-- a regularized fallback when the matrix is near singular.
+```text
+span = end - start
+bg_mean = background.mean[span][code]
+bg_var = background.covariance[span][code]
+```
 
-This reduces work, improves numerical behavior, and avoids mutating a global
-matrix as the API.
+Score:
 
-### 4. Candidate Fingerprints for Duplicate Checks
+```text
+diff = fg_mean - bg_mean
+variance = fg_var + bg_var + kFeatureScoreRidge
+score = diff * diff / variance
+signed_effect = diff / variance
+```
 
-The current duplicate check compares every candidate against the population by
-scanning all placements and all features. Add stable fingerprints:
+Use squared score for ranking so both enriched and depleted features can be
+selected. Keep `signed_effect` for optional placement scoring or diagnostics.
 
-- one hash for `features`;
-- one hash for `pos/ori`;
-- one combined candidate hash.
+Sorting:
 
-Use a hash set for population membership. Only perform full equality checks
-when hashes collide. This removes repeated O(`population_size * nseq`) scans
-from the mutation and recombination hot paths.
+- Sort descending by `score`.
+- Drop entries with non-finite score.
+- Keep the full sorted pool initially. Limit top-N sampling at use sites rather
+  than truncating the pool during construction.
 
-Fingerprints are an acceleration structure, not the source of truth. Keep a full
-equality fallback for collisions and test that feature ordering, placement
-ordering, and strand changes all affect the combined candidate identity.
+## Shared Feature Value Helper
 
-### 5. In-Place Mutation With Rollback
+Add a small pure helper so pool scoring and placement refinement do not need to
+construct a temporary `Candidate`.
 
-The current mutation loop copies the entire candidate before each attempt. The
-new implementation should mutate in place and keep a small rollback record:
+Suggested helper:
 
-- old feature values for feature mutations;
-- old position and strand for placement mutations;
-- old cached score components when using incremental fitness.
+```cpp
+bool feature_value_for_placement(
+    const Feature& feature,
+    const EncodedSequence& sequence,
+    int position,
+    unsigned char orientation,
+    double& value
+);
+```
 
-If the candidate is rejected, restore from the rollback record. If accepted,
-commit the cached state and fingerprint.
+Behavior:
 
-This avoids repeated allocation and full-array copies.
+- Select the prefix table by `orientation`.
+- Compute `start = position + feature.start`.
+- Compute `end = position + feature.end`.
+- Return `false` if the interval contains invalid bases.
+- Otherwise set `value` to the interval frequency of `feature.code` and return
+  `true`.
 
-Rollback should be introduced after the pure mutation operators and duplicate
-checks are covered by invariant tests. Until then, full-copy mutation is slower
-but easier to debug.
+Then `feature_values_for_placement` can reuse this helper. This removes a small
+piece of duplication and keeps invalid-interval handling consistent.
 
-### 6. Limit Final Output Work
+## Directed Feature Replacement
 
-The current implementation writes `*_matN` and `*_locN` for every population
-member. The Python wrapper usually consumes only the first few motifs.
+Add a new mutation path instead of replacing the existing random mutations.
 
-The new backend should support:
+Suggested signature:
 
-- `num_motifs` (number of best candidates written as motif files);
-- default of 20 motifs, capped by `pop_size`;
-- `pop_size` configurable through the Python wrapper (default 100, max 500).
+```cpp
+bool try_directed_feature_replacement(
+    Candidate& candidate,
+    const std::vector<Candidate>& population,
+    int population_index,
+    const std::vector<FeaturePoolEntry>& feature_pool,
+    const EncodedSequences& sequences,
+    const BackgroundStats& background,
+    const SearchConfig& config,
+    Rng& rng
+);
+```
 
-`num_motifs` and `pop_size` are passed explicitly via `TrainParams` from the
-Python wrapper; no environment variable is involved.
+Mutation behavior:
 
-This can remove a large amount of final scanning work.
+1. Save old `features`, `positions`, `orientations`, and `fingerprint`.
+2. Pick one existing feature index at random.
+3. Pick a proposed replacement from the top part of the feature pool.
+4. Require `can_use_feature(candidate.features, proposed, feature_index)`.
+5. Require the replacement to be different from the old feature.
+6. Sort features and mark stats invalid.
+7. Run short placement repair/refinement.
+8. Recompute candidate stats and final fitness.
+9. Accept only if fitness improved and the candidate is not a duplicate.
+10. Otherwise restore all saved feature and placement state.
 
-### 7. Faster Position Weight Preprocessing
+Top-pool limit:
 
-Current preprocessing sorts all window scores per sequence to find a top-third
-threshold. The rewrite can use `nth_element` for threshold selection, then build
-the selected-position list in linear time.
+```text
+pool_limit = min(
+    feature_pool.size(),
+    max(config.feature_count * kFeaturePoolTopMultiplier, config.feature_count)
+)
+```
 
-This is not the main bottleneck, but it is simple and preserves clarity.
+This keeps proposals directed without making every candidate identical.
 
-### 8. Remove Unused Work From the Hot Path
+If no valid replacement is found after `kDirectedFeatureAttempts`, return
+`false`.
 
-If preserving current behavior, do not compute values that do not affect
-selection:
+## Placement Repair And Refinement
 
-- skip information-content computation when `infc` is inactive or when current
-  compatibility mode ignores `inf`;
-- avoid log/debug formatting unless verbose logging requires it;
-- avoid building temporary arrays that are not consumed.
+Add placement refinement specifically for the directed feature mutation. Do not
+run it after every existing random mutation in the first version.
 
-These changes should be controlled by tests because they can alter floating
-point operation order or RNG consumption if done carelessly.
+Suggested signature:
 
-## Validation Strategy
+```cpp
+void refine_placements_after_feature_change(
+    Candidate& candidate,
+    const EncodedSequences& sequences,
+    const BackgroundStats& background,
+    const SearchConfig& config,
+    Rng& rng
+);
+```
 
-The rewrite should be validated in stages.
+The function should be bounded. Avoid full scans across all windows for every
+mutation attempt.
 
-### Stage 1: Deterministic Component Tests
+Recommended strategy:
 
-Add unit tests for pure functions:
+1. Recompute stats for the candidate after feature replacement.
+2. If current placements contain invalid intervals, first try to repair them.
+3. If the candidate is valid and has usable weights, refine by model score.
+4. Recompute final stats once after changing placements.
 
-- sequence encoding;
-- reverse complement encoding;
-- background means and covariance;
-- k-mer log-ratio computation;
-- position candidate selection;
-- LPD feature value computation;
-- covariance assembly;
-- Mahalanobis score for a fixed small example;
-- linear-solver parity against the current matrix-inversion result on small
-  non-singular examples;
-- mutation invariants;
-- recombination invariants.
+### Repair Mode
 
-Add a small debug-only way to construct and score a fixed candidate without
-running the full genetic search. This gives a stable comparison target for the
-new full-fitness implementation before RNG-driven search behavior is involved.
+Repair mode is needed because a new feature can make the current placements
+invalid. If the code computes model weights before repair, weights may be all
+zero and the mutation will be rejected too early.
 
-### Stage 2: Golden Tests Against Current Backend
+For selected sequences:
 
-Create small FASTA fixtures and run both implementations with the same seed.
-Compare:
+- Always include sequences whose current placement has invalid intervals.
+- Also include a small random subset of other sequences up to
+  `kPlacementRefineSequenceLimit`.
+- Build a small candidate placement set:
+  - current position;
+  - `kPlacementRefineSamples` calls to `sample_weighted_position`;
+  - both orientations for each sampled position.
+- Skip placements where any candidate feature interval is invalid.
+- In repair mode, choose the valid placement with the best
+  `placement_kmer_weight`.
 
-- full fitness for fixed candidate states;
-- best fitness;
-- generated matrix files;
-- location files;
-- candidate feature invariants;
-- ranking stability where exact equality is reasonable.
+If no valid placement is found for a sequence, leave it unchanged. The final
+fitness will remain zero if invalid intervals remain, and the mutation will be
+rejected.
 
-Exact parity may not hold after fixing known bugs. In that case, keep two
-comparison modes:
+### Model-Score Refinement Mode
 
-- `legacy_compat`: reproduces current component behavior as closely as
-  practical for validation;
-- `corrected`: applies intentional bug fixes and compares biological/output
-  quality instead of exact byte-level parity.
+After repair, if the candidate is valid:
 
-Do not make byte-for-byte reproduction of the whole stochastic search a hard
-requirement after bug fixes. It is enough to prove component parity where
-intended, deterministic behavior for the new backend, and stable output quality
-on fixed benchmark inputs.
+1. Compute temporary model weights for the changed feature set.
+2. For selected sequences, evaluate the sampled positions and both
+   orientations.
+3. Skip invalid placements.
+4. Choose the placement with the highest model score.
 
-### Stage 3: Runtime Benchmarks
+Use a local placement scoring helper that accepts precomputed feature values.
+Do not call `recompute_candidate_stats` for every trial window.
 
-Benchmark both implementations on:
+The refinement can use the existing output scoring idea:
 
-- tiny test data for CI;
-- small real-data subset;
-- 400-record real-data subset used by external smoke tests;
-- at least one larger dataset if available.
+```text
+score = sum(weights[i] * feature_value[i])
+normalized_score = (score - weights.minimum) / weights.range
+```
 
-Measure:
+The normalized score is only used for comparing placements inside one
+candidate. The final accept/reject decision must still use `candidate.fit`.
 
-- total runtime;
-- number of fitness evaluations;
-- time spent in fitness evaluation;
-- time spent in duplicate checks;
-- final output writing time;
-- best fitness and output motif count.
+## Integration Points
 
-Benchmarks should report fixed seed, input sizes, `motif_len`, `size`,
-`pop_size`, and output count.
+### `train_impl`
 
-### Stage 4: Integration Rollout
+After:
 
-Add the new backend without removing the old one:
+```cpp
+auto background = build_background_stats(background_sequences, config.max_lpd);
+```
 
-- keep old `sitega.train` behavior available;
-- expose an opt-in backend selector;
-- expose `num_motifs` and `pop_size` via the Python wrapper as explicit
-  `TrainParams` fields (defaults: 20 motifs, population 100);
-- run both backends in CI on small deterministic data;
-- switch the default only after speed and result quality are documented.
+add:
 
-## Compatibility Policy
+```cpp
+auto feature_pool = build_feature_pool(encoded, background, config);
+```
 
-The rewrite should distinguish between compatibility and correctness.
+Log basic diagnostics:
 
-Preserve:
+```text
+Feature pool size=<n> best_score=<score>
+```
 
-- public Python return shape;
-- output file format where practical;
-- command-line parameters;
-- deterministic seed behavior for the new backend;
-- C ABI status-return semantics at the `sitega_train()` boundary.
+Then pass `feature_pool` into `initialize_population` only if directed
+initialization is implemented. Always pass it into `run_search`.
 
-Do not preserve:
+### `run_search`
 
-- global mutable state;
-- accidental bugs unless explicitly required for `legacy_compat`;
-- full-population output when the caller asks for fewer motifs;
-- exact floating point artifacts from full matrix inversion;
-- hidden calls to `exit(1)` from library code.
+Change signature to accept:
+
+```cpp
+const std::vector<FeaturePoolEntry>& feature_pool
+```
+
+Change mutation selection from three types to four types:
+
+```text
+0 -> random feature code mutation
+1 -> random feature interval mutation
+2 -> placement mutation
+3 -> directed feature replacement + placement refinement
+```
+
+Keep old mutation paths unchanged.
+
+Track accepted directed mutations separately in the log if useful:
+
+```text
+Gen <n> Fit <fit> Mut <accepted_random> Dir <accepted_directed> Rec <accepted_recombinations> Delta <delta>
+```
+
+If the log format should stay stable, include directed mutations in `Mut` and
+only add extra verbose logging when `config.verbose` is true.
+
+### `initialize_population`
+
+First implementation can leave initialization unchanged. This isolates the
+effect of the new mutation path.
+
+Second implementation can bias feature initialization from the feature pool:
+
+- choose positions/orientations as today;
+- fill features from top-pool samples using `can_use_feature`;
+- fall back to current random feature generation if the pool cannot fill the
+  candidate.
+
+Do not remove the fallback. It preserves diversity and protects edge cases where
+the ranked pool is too narrow.
+
+## Acceptance And Rollback Details
+
+Directed mutation must roll back all state affected by replacement/refinement:
+
+- `features`
+- `positions`
+- `orientations`
+- `fingerprint`
+- statistics, by recomputing after restore
+
+Do not try to preserve old `feature_sum`, `second_moment`, `kmer_sum`, `mah`,
+`fpr`, and `fit` manually. Recompute after restore. This is simpler and less
+error-prone.
+
+Acceptance condition should match existing mutation policy:
+
+```cpp
+candidate.fit > old_fit + kScoreEpsilon &&
+!duplicate_candidate(candidate, population, population_index)
+```
+
+If rejected, restore and recompute:
+
+```cpp
+candidate.features = old_features;
+candidate.positions = old_positions;
+candidate.orientations = old_orientations;
+candidate.fingerprint = old_fingerprint;
+candidate.stats_valid = false;
+recompute_candidate_stats(candidate, sequences, background, config);
+```
+
+## Runtime Controls
+
+The main runtime risk is placement refinement. Keep it bounded from the first
+implementation.
+
+Recommended limits:
+
+- Use at most `kPlacementRefineSequenceLimit` sequences per directed mutation,
+  plus any sequences that must be repaired because their current placement is
+  invalid.
+- Use at most `kPlacementRefineSamples` sampled positions per selected sequence.
+- Evaluate both orientations for each sampled position.
+- Recompute full candidate stats once before refinement and once after
+  refinement, not per trial placement.
+
+If runtime is still high, reduce directed mutation frequency before reducing
+population size or generations. For example, use four mutation types but let
+directed replacement happen only on every second attempt or only for the better
+half of the population.
+
+## Correctness Risks
+
+### Invalid intervals
+
+New features can introduce invalid intervals for current placements. The
+placement refinement must try repair before relying on model weights. If invalid
+intervals remain, `evaluate_from_stats` will correctly return zero fitness.
+
+### Reduced diversity
+
+If all candidates draw from the same top-ranked features, the population can
+collapse. Mitigations:
+
+- keep old random mutations;
+- sample from top-N rather than always picking rank 0;
+- keep random initialization in the first implementation;
+- keep recombination unchanged.
+
+### Local overfitting to candidate windows
+
+The pool is built from `candidate_positions`, which are already biased by
+k-mer enrichment. This is intentional, but it can overemphasize the initial
+k-mer filter. Mitigation:
+
+- include both orientations;
+- normalize per sequence;
+- keep placement mutation and recombination active;
+- compare results against the current backend on real and synthetic tests.
+
+### More duplicated scoring code
+
+Avoid adding another separate implementation of feature value extraction. Add
+`feature_value_for_placement` and reuse it from pool scoring, refinement, and
+the existing per-placement feature evaluation where practical.
+
+## Verification Plan
+
+Fast checks:
+
+```bash
+uv run ruff check .
+uv run pytest
+```
+
+Targeted behavioral checks to add or perform:
+
+- Same seed should produce deterministic output.
+- Feature pool should be non-empty for valid configs.
+- Feature pool should be sorted by descending finite score.
+- Directed mutation should restore the candidate exactly when rejected.
+- Directed mutation should not introduce duplicate candidates.
+- Candidate features should still satisfy `valid_feature_set`.
+- Candidates with unresolved invalid intervals should get zero fitness and be
+  rejected.
+
+Integration comparison:
+
+- Run the existing fast SiteGA tests.
+- Compare logs before and after the change for:
+  - accepted directed mutation count;
+  - final best fitness;
+  - runtime.
+
+External real-data full-run tests remain opt-in. Do not run them for the first
+implementation unless specifically validating real integrations.
 
 ## Suggested Implementation Order
 
-1. Add a debug/sanitizer build path and stricter warnings for the SiteGA
-   extension.
-2. Add profiling counters to the current implementation to establish baseline
-   runtime and hot-path call counts.
-3. Add a fixed-candidate scoring harness for comparing old and new fitness
-   implementations without running the full genetic search.
-4. Write new sequence encoding and prefix-count code with unit tests.
-5. Implement background statistics and position weighting.
-6. Implement candidate representation without cached incremental state.
-7. Implement full fitness recomputation using prefix counts and linear solve.
-8. Compare full fitness on fixed candidates against the old implementation.
-9. Implement duplicate checks with fingerprints and full-equality fallback.
-10. Implement mutations and recombinations with invariant tests.
-11. Add incremental fitness for placement mutations and verify it against fresh
-    full recomputation after each mutation type.
-12. Add in-place mutation rollback.
-13. Implement output generation with configurable output count.
-14. Run golden tests and runtime benchmarks against the old backend.
-15. Add an opt-in Python/backend switch.
-16. Make the new backend default only after validation.
+1. Add `FeaturePoolEntry` and `feature_value_for_placement`.
+2. Implement `build_feature_pool` and log pool size/best score.
+3. Add tests or lightweight assertions for pool construction behavior.
+4. Add `try_directed_feature_replacement` without placement refinement; verify
+   rollback and duplicate handling.
+5. Add bounded repair/refinement of placements inside the directed mutation.
+6. Wire directed mutation into `run_search` as a fourth mutation type.
+7. Run fast tests and inspect logs for acceptance rate and runtime.
+8. Only after that, consider feature-pool-biased initialization.
 
-## Expected Impact
-
-The most important expected speedups are:
-
-- large reduction from incremental placement mutations;
-- constant-time LPD feature scoring from prefix counts;
-- faster and more stable Mahalanobis computation by solving a linear system;
-- removal of repeated full population scans through candidate fingerprints;
-- less final output work when only top motifs are needed.
-
-Together these changes should be capable of multi-fold single-threaded speedups
-without changing the external API or relying on OpenMP.
+This order keeps the diff reviewable and makes it possible to isolate whether
+quality changes come from directed feature proposals or from placement
+refinement.

@@ -689,11 +689,11 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         nmotifs: int = 5,
         threads: int | None = None,
         seed: int | None = None,
-        pop_size: int = 100,
+        pop_size: int = 50,
         num_motifs: int = 20,
-        generations: int | None = 80,
-        mutation_attempts: int | None = 12,
-        stale_generations: int | None = 20,
+        generations: int | None = 50,
+        mutation_attempts: int | None = 50,
+        stale_generations: int | None = 10,
     ) -> None:
         super().__init__(name="sitega")
         self.nmotifs = nmotifs
