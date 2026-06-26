@@ -28,8 +28,8 @@ struct PyTrainParams {
     unsigned long seed = 0;
     int verbose = 0;
     int num_threads = 0;  // 0 = use OMP_NUM_THREADS env var
-    int pop_size = 0;     // 0 = default 100, max 500 (MEGE)
-    int num_motifs = 0;   // 0 = default 20, capped by pop_size
+    int pop_size = 0;     // 0 = default 100, max 500, per island
+    int num_motifs = 0;   // 0 = default 20 independent islands / motifs
     int generations = 0;        // 0 = backend default
     int mutation_attempts = 0;  // 0 = backend default
     int stale_generations = 0;  // 0 = backend default
@@ -82,7 +82,7 @@ struct PyTrainParams {
 };
 
 PYBIND11_MODULE(sitega, m) {
-    m.doc() = "SiteGA: de novo motif search via genetic algorithm over LPDs";
+    m.doc() = "SiteGA: de novo motif search via island genetic algorithm over LPDs";
 
     // Bind PyTrainParams with readable/writable attributes
     py::class_<PyTrainParams>(m, "TrainParams")
@@ -123,7 +123,7 @@ PYBIND11_MODULE(sitega, m) {
             r.best_fit
         );
     }, py::arg("params"),
-       "Train a SiteGA model from a TrainParams object. "
+       "Train a SiteGA island model from a TrainParams object. "
        "Returns (rc, mat_path, loc_path, best_fit). rc=0 on success.");
 
     // Convenience wrapper: train using keyword arguments
@@ -181,6 +181,6 @@ PYBIND11_MODULE(sitega, m) {
        py::arg("generations") = 0,
        py::arg("mutation_attempts") = 0,
        py::arg("stale_generations") = 0,
-       "Train a SiteGA model with keyword arguments. "
+       "Train a SiteGA island model with keyword arguments. "
        "Returns (rc, mat_path, loc_path, best_fit). rc=0 on success.");
 }

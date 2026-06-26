@@ -71,7 +71,7 @@ def test_sitega_discovery_uses_returned_mat_path(monkeypatch, tmp_path):
             "log_file": "sitega.log",
             "num_threads": 0,
             "seed": 0,
-            "pop_size": 50,
+            "pop_size": 30,
             "num_motifs": 20,
             "generations": 50,
             "mutation_attempts": 50,
@@ -154,7 +154,7 @@ def test_sitega_discovery_reads_ranked_outputs_from_returned_mat_path(
     assert (output_dir / "foreground_mat10.mat").exists()
 
 
-def test_sitega_discovery_requests_at_least_requested_motif_count(
+def test_sitega_discovery_requests_at_least_requested_island_count(
     monkeypatch, tmp_path
 ):
     foreground = tmp_path / "foreground.fa"
@@ -320,19 +320,36 @@ def test_sitega_discovery_real_backend_smoke(tmp_path):
     foreground = "tests/test_data/small_pipeline/foreground.fa"
     background = "tests/test_data/small_pipeline/background.fa"
 
-    motifs = SitegaDiscoveryTool(seed=123).discover(
+    motifs = SitegaDiscoveryTool(
+        seed=123,
+        pop_size=6,
+        num_motifs=3,
+        generations=1,
+        mutation_attempts=1,
+        stale_generations=1,
+    ).discover(
         foreground,
         background,
         os.fspath(output_dir),
-        number_of_motifs=1,
+        number_of_motifs=3,
         length=8,
         lpd=10,
     )
 
-    assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 8)]
-    assert (output_dir / "foreground_mat1.mat").exists()
+    assert [(motif.name, motif.length) for motif in motifs] == [
+        ("Sitega-1", 8),
+        ("Sitega-2", 8),
+        ("Sitega-3", 8),
+    ]
+    for index in range(1, 4):
+        assert (output_dir / f"foreground_mat{index}.mat").exists()
+        assert (output_dir / f"foreground_loc{index}").exists()
     log_text = (output_dir / "sitega.log").read_text()
     assert "Feature pool size=" in log_text
+    assert "pop_size_per_island=6" in log_text
+    assert "islands=3" in log_text
+    assert "Island 1/3" in log_text
+    assert "Island 3 winner_fit=" in log_text
     assert "Pipeline completed successfully!" in log_text
 
 

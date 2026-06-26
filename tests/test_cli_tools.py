@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
+import sys
+
 import pytest
 
 from motifhorde.cli import (
     _resolve_jobs,
     check_dependencies,
     create_arg_parser,
+    main_cli,
     setup_comparator,
     setup_discovery_params,
     setup_discovery_tool,
@@ -28,6 +32,68 @@ def _parse(tool: str, *extra: str, validate: bool = True):
     if validate:
         validate_args(parser, args)
     return args
+
+
+def _write_fasta(path):
+    path.write_text(">seq\nACGT\n")
+
+
+class FakePipeline:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    def run(self, **kwargs) -> None:
+        logging.getLogger("input").info(
+            "loaded | foreground=1 | background=1 | promoters=1"
+        )
+        logging.getLogger("bootstrap").info(
+            "start | param_sets=1 | tasks=2 | jobs=1 | motifs_per_task=1 | fpr=0.001"
+        )
+        logging.getLogger("bootstrap.compare").info(
+            "complete | param_sets=1 | matched_param_sets=1 | records=1"
+        )
+        logging.getLogger("final.dedup").info(
+            "done | candidates=1 | kept=1 | removed=0"
+        )
+        logging.getLogger("pipeline").info("done | elapsed=0.0s")
+
+
+def _run_main_cli(monkeypatch, tmp_path, capsys, *extra_args: str) -> str:
+    foreground = tmp_path / "foreground.fa"
+    background = tmp_path / "background.fa"
+    promoters = tmp_path / "promoters.fa"
+    output = tmp_path / "out"
+    for path in [foreground, background, promoters]:
+        _write_fasta(path)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "motifhorde",
+            str(foreground),
+            str(background),
+            str(promoters),
+            str(output),
+            "-t",
+            "sitega",
+            "-l",
+            "6",
+            "--lpd",
+            "10",
+            "-n",
+            "1",
+            *extra_args,
+        ],
+    )
+    monkeypatch.setattr("motifhorde.cli.check_dependencies", lambda args: None)
+    monkeypatch.setattr("motifhorde.cli.setup_discovery_tool", lambda args: object())
+    monkeypatch.setattr("motifhorde.cli.setup_evaluator", lambda args: object())
+    monkeypatch.setattr("motifhorde.cli.setup_comparator", lambda args: object())
+    monkeypatch.setattr("motifhorde.cli.DeNovoPipeline", FakePipeline)
+
+    main_cli()
+    return capsys.readouterr().out
 
 
 def test_cli_help_includes_new_tools_and_options():
@@ -70,6 +136,27 @@ def test_cli_help_excludes_removed_options():
         "--jstacs-threads",
     ]:
         assert text not in help_text
+
+
+def test_verbose_cli_stdout_uses_structured_log_events(monkeypatch, tmp_path, capsys):
+    stdout = _run_main_cli(monkeypatch, tmp_path, capsys, "--verbose")
+
+    assert "INFO  [pipeline] start" in stdout
+    assert "[pipeline] workers" in stdout
+    assert "[pipeline] params | length=6 | lpd=10" in stdout
+    assert "[input] loaded" in stdout
+    assert "[bootstrap] start" in stdout
+    assert "[bootstrap.compare]" in stdout
+    assert "[final.dedup]" in stdout
+    assert "[pipeline] done" in stdout
+    assert "MotifHORDE De Novo Pipeline" not in stdout
+    assert "Pipeline completed successfully!" not in stdout
+
+
+def test_non_verbose_cli_stdout_suppresses_info_events(monkeypatch, tmp_path, capsys):
+    stdout = _run_main_cli(monkeypatch, tmp_path, capsys)
+
+    assert stdout == ""
 
 
 def test_parser_accepts_mimosa_and_rejects_continuous():

@@ -6,6 +6,7 @@ import os
 import sys
 import shutil
 import argparse
+import logging
 from typing import Dict, List, Any
 
 from motifhorde.external import (
@@ -341,6 +342,17 @@ def _resolve_jobs(jobs: int) -> int:
     return jobs
 
 
+def configure_logging(verbose: bool) -> None:
+    level = logging.INFO if verbose else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
+
+
 def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.jobs == 0 or args.jobs < -1:
         parser.error("--jobs must be -1 or a positive integer")
@@ -630,9 +642,11 @@ def setup_discovery_params(args) -> Dict[str, List[Any]]:
             sys.exit(1)
 
     if args.verbose:
-        print("Discovery parameters:")
-        for key, values in params.items():
-            print(f"  {key}: {values}")
+        params_text = " | ".join(
+            f"{key}={','.join(str(value) for value in values)}"
+            for key, values in sorted(params.items())
+        )
+        logging.getLogger("pipeline").info("params | %s", params_text)
 
     return params
 
@@ -653,6 +667,7 @@ def main_cli():
 
     args = parser.parse_args()
     validate_args(parser, args)
+    configure_logging(args.verbose)
 
     # Validate inputs
     if not os.path.exists(args.foreground):
@@ -674,20 +689,22 @@ def main_cli():
     os.makedirs(args.output, exist_ok=True)
 
     # Setup pipeline components
-    if args.verbose:
-        resolved_jobs = _resolve_jobs(args.jobs)
-        print("=" * 60)
-        print("MotifHORDE De Novo Pipeline")
-        print("=" * 60)
-        print(f"Discovery tool: {args.tool}")
-        print(f"Comparator: {args.comparator}")
-        print(f"Metric: {args.metric}")
-        print(f"FPR threshold: {args.fpr}")
-        print(f"Jobs: {args.jobs}")
-        print(f"Bootstrap discovery workers: {resolved_jobs}")
-        print("Discovery tool internal threads during bootstrap: 1")
-        print(f"Comparator jobs: {args.jobs}")
-        print("=" * 60)
+    resolved_jobs = _resolve_jobs(args.jobs)
+    pipeline_logger = logging.getLogger("pipeline")
+    pipeline_logger.info(
+        "start | tool=%s | comparator=%s | metric=%s | fpr=%s | jobs=%s | seed=%s",
+        args.tool,
+        args.comparator,
+        args.metric,
+        args.fpr,
+        resolved_jobs,
+        args.seed,
+    )
+    pipeline_logger.info(
+        "workers | bootstrap_discovery=%s | discovery_threads=1 | comparator_jobs=%s",
+        resolved_jobs,
+        args.jobs,
+    )
 
     discovery_tool = setup_discovery_tool(args)
     evaluator = setup_evaluator(args)
@@ -713,12 +730,6 @@ def main_cli():
         discovery_params=discovery_params,
         metric=args.metric,
     )
-
-    if args.verbose:
-        print("=" * 60)
-        print("Pipeline completed successfully!")
-        print(f"Results saved to: {args.output}")
-        print("=" * 60)
 
 
 if __name__ == "__main__":

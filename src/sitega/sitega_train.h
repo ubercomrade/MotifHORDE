@@ -28,8 +28,8 @@ struct TrainParams {
     const char* log_file;   /* arg 11: output log filename */
     unsigned long seed;     /* optional: RNG seed (0 = time(NULL)) */
     int verbose;            /* optional: 0 = summary only, 1 = per-individual detail */
-    int pop_size;           /* optional: population size (0 = default 100, max 500) */
-    int num_motifs;         /* optional: number of best motifs to write (0 = default 20, capped by pop_size) */
+    int pop_size;           /* optional: population size per island (0 = default 100, max 500) */
+    int num_motifs;         /* optional: independent islands / motifs to write (0 = default 20, capped by pop_size) */
     int generations;        /* optional: GA generations (0 = backend default) */
     int mutation_attempts;  /* optional: mutations per candidate per generation (0 = backend default) */
     int stale_generations;  /* optional: early stop after stale generations (0 = backend default) */

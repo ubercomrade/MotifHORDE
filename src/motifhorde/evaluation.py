@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import multiprocessing
 import os
 import tempfile
+import time
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
 from typing import Any, Dict, Iterable, List, Tuple, TypedDict
@@ -26,6 +28,15 @@ from mimosa.scanning import calculate_threshold_table
 
 from .discovery import MotifDiscoveryTool
 from .io import write_fasta
+from .log_format import (
+    format_elapsed as _format_elapsed,
+    format_log_params as _format_log_params,
+)
+
+logger = logging.getLogger("evaluation")
+bootstrap_logger = logging.getLogger("bootstrap")
+bootstrap_discovery_logger = logging.getLogger("bootstrap.discovery")
+bootstrap_evaluate_logger = logging.getLogger("bootstrap.evaluate")
 
 
 class BootstrapTask(TypedDict):
@@ -45,6 +56,7 @@ class BootstrapDiscoveryResult(TypedDict):
     params: dict[str, Any]
     params_suffix: str
     step_name: str
+    elapsed: float
     motifs: list[GenericModel]
 
 
@@ -89,7 +101,10 @@ class PerformanceEvaluator:
         elif self.background_type == "peaks":
             false_scores = best_scores(motif, negatives)
         else:
-            print(f"Incorrect background_type: {self.background_type}, set as `peaks`")
+            logger.warning(
+                "invalid_background_type | value=%s | fallback=peaks",
+                self.background_type,
+            )
             false_scores = best_scores(motif, negatives)
 
         classification = np.concatenate(
@@ -165,8 +180,7 @@ class Bootstrapper:
         err_threshold: float,
         discovery_params: Dict[str, Iterable[Any]],
     ) -> Tuple[Dict[str, Any], List[GenericModel]]:
-        print("Starting bootstrap...")
-
+        start_time = time.perf_counter()
         task_parent = os.path.join(self.output_dir, self.discovery_tool.name)
         os.makedirs(task_parent, exist_ok=True)
         with tempfile.TemporaryDirectory(
@@ -181,19 +195,56 @@ class Bootstrapper:
                 number_of_motifs,
                 self.seed,
             )
+            bootstrap_logger.info(
+                "start | param_sets=%d | tasks=%d | jobs=%d | motifs_per_task=%d | fpr=%s",
+                len(tasks) // 2,
+                len(tasks),
+                self.jobs,
+                number_of_motifs,
+                err_threshold,
+            )
+            discovery_start = time.perf_counter()
             results = _run_bootstrap_discovery_tasks(
                 self.discovery_tool,
                 tasks,
                 self.jobs,
             )
+            sorted_results = sorted(results, key=lambda item: item["index"])
+            motifs_found = sum(len(result["motifs"]) for result in sorted_results)
+            for task_number, result in enumerate(sorted_results, start=1):
+                bootstrap_discovery_logger.info(
+                    "done | task=%d/%d | split=%s | params=%s | motifs_found=%d | elapsed=%s",
+                    task_number,
+                    len(sorted_results),
+                    result["step_name"],
+                    _format_log_params(result["params"]),
+                    len(result["motifs"]),
+                    _format_elapsed(result["elapsed"]),
+                )
+            bootstrap_discovery_logger.info(
+                "complete | tasks=%d | motifs_found=%d | elapsed=%s",
+                len(sorted_results),
+                motifs_found,
+                _format_elapsed(time.perf_counter() - discovery_start),
+            )
 
-            return _evaluate_bootstrap_results(
+            statistics, bootstrap_motifs = _evaluate_bootstrap_results(
                 self.evaluator,
-                results,
+                sorted_results,
                 test_batches,
                 background,
                 err_threshold,
             )
+            bootstrap_evaluate_logger.info(
+                "done | motifs=%d | statistics=%d",
+                len(bootstrap_motifs),
+                len(statistics),
+            )
+            bootstrap_logger.info(
+                "done | elapsed=%s",
+                _format_elapsed(time.perf_counter() - start_time),
+            )
+            return statistics, bootstrap_motifs
 
 
 def _bootstrap_indices(n_peaks: int, step_name: str) -> tuple[list[int], list[int]]:
@@ -273,6 +324,7 @@ def _run_discovery_task(
     discovery_tool: MotifDiscoveryTool,
     task: BootstrapTask,
 ) -> BootstrapDiscoveryResult:
+    start_time = time.perf_counter()
     try:
         kwargs = dict(task["params"])
         if task["seed"] is not None and discovery_tool.name == "sitega":
@@ -296,6 +348,7 @@ def _run_discovery_task(
         "params": task["params"],
         "params_suffix": task["params_suffix"],
         "step_name": task["step_name"],
+        "elapsed": time.perf_counter() - start_time,
         "motifs": motifs,
     }
 
@@ -327,9 +380,7 @@ def _evaluate_bootstrap_results(
         test_peaks = test_batches[result["index"]]
         for motif in result["motifs"]:
             stats = evaluator.evaluate(motif, test_peaks, background, err_threshold)
-            motif.name = (
-                f"{motif.name}_{result['params_suffix']}_{result['step_name']}"
-            )
+            motif.name = f"{motif.name}_{result['params_suffix']}_{result['step_name']}"
             statistics[motif.name] = stats
             bootstrap_motifs.append(motif)
 

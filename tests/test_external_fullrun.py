@@ -75,7 +75,9 @@ def _write_fasta_subset(source: str, target: Path, record_limit: int) -> None:
                 output_handle.write(line)
 
     if records < record_limit:
-        raise ValueError(f"{source} contains {records} records, expected {record_limit}")
+        raise ValueError(
+            f"{source} contains {records} records, expected {record_limit}"
+        )
 
 
 def _write_run_log(log_path: Path, result: subprocess.CompletedProcess) -> None:
@@ -220,7 +222,7 @@ def test_real_data_full_pipeline_smoke_with_verbose_log(tool, tmp_path):
     log_text = log_path.read_text()
     assert result.returncode == 0, log_text
     assert log_path.exists()
-    assert "MotifHORDE De Novo Pipeline" in log_text
+    assert "[pipeline] start" in log_text
 
     models_dir = output_dir / tool / "motifs" / "models"
     model_paths = sorted(models_dir.glob("*.pkl"))

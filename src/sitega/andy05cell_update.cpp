@@ -1925,18 +1925,19 @@ void run_search(
 
         sort_population(population);
 
-        const int recombination_attempts =
-            std::max(1, static_cast<int>(population.size()) / 2);
-        const int parent_pool =
-            std::max(1, static_cast<int>(population.size()) / 2);
+        const int population_size = static_cast<int>(population.size());
+        const int recombination_attempts = population_size > 1
+            ? std::max(1, population_size / 2)
+            : 0;
+        const int parent_pool = std::max(1, population_size / 2);
         for (int attempt = 0; attempt < recombination_attempts; ++attempt) {
             const int first_index = rng.range(parent_pool);
-            int second_index = rng.range(static_cast<int>(population.size() - 1));
+            int second_index = rng.range(population_size - 1);
             if (second_index >= first_index) {
                 ++second_index;
             }
             const int target_index =
-                static_cast<int>(population.size()) - 1 - rng.range(parent_pool);
+                population_size - 1 - rng.range(parent_pool);
             auto child = recombine_candidates(
                 population[static_cast<std::size_t>(first_index)],
                 population[static_cast<std::size_t>(second_index)],
@@ -1971,6 +1972,48 @@ void run_search(
             stale_generations = 0;
         }
     }
+}
+
+std::vector<Candidate> run_island_searches(
+    const std::vector<FeaturePoolEntry>& feature_pool,
+    const EncodedSequences& sequences,
+    const BackgroundStats& background,
+    const SearchConfig& config,
+    Rng& rng,
+    std::ostream& log
+) {
+    std::vector<Candidate> winners;
+    winners.reserve(static_cast<std::size_t>(config.num_motifs));
+
+    for (int island = 0; island < config.num_motifs; ++island) {
+        log << "Island " << (island + 1) << "/" << config.num_motifs << '\n';
+
+        auto population = initialize_population(
+            sequences,
+            background,
+            config,
+            rng,
+            log
+        );
+        run_search(
+            population,
+            feature_pool,
+            sequences,
+            background,
+            config,
+            rng,
+            log
+        );
+        sort_population(population);
+
+        winners.push_back(std::move(population.front()));
+        log << "Island " << (island + 1)
+            << " winner_fit=" << std::setprecision(8)
+            << winners.back().fit << '\n';
+    }
+
+    sort_population(winners);
+    return winners;
 }
 
 ModelWeights model_weights_from_stats(
@@ -2216,7 +2259,7 @@ std::string output_base(const SearchConfig& config) {
 }
 
 void write_outputs(
-    std::vector<Candidate>& population,
+    std::vector<Candidate>& candidates,
     const EncodedSequences& sequences,
     const BackgroundStats& background,
     const SearchConfig& config,
@@ -2230,10 +2273,10 @@ void write_outputs(
     const std::string base = output_base(config);
     const int num_motifs = std::min(
         config.num_motifs,
-        static_cast<int>(population.size())
+        static_cast<int>(candidates.size())
     );
     for (int index = 0; index < num_motifs; ++index) {
-        auto& candidate = population[static_cast<std::size_t>(index)];
+        auto& candidate = candidates[static_cast<std::size_t>(index)];
         auto weights = compute_model_weights(candidate, sequences, background, config);
         const std::string suffix = std::to_string(index + 1);
         write_matrix(base + "_mat" + suffix, candidate, weights, config);
@@ -2243,7 +2286,7 @@ void write_outputs(
     if (result != nullptr) {
         copy_result_path(result->mat_path, base + "_mat1");
         copy_result_path(result->loc_path, base + "_loc1");
-        result->best_fit = population.empty() ? 0.0 : population.front().fit;
+        result->best_fit = candidates.empty() ? 0.0 : candidates.front().fit;
         result->status = 0;
     }
 }
@@ -2270,8 +2313,8 @@ int train_impl(const TrainParams& params, TrainResult* result) {
         << " size=" << config.feature_count
         << " max_lpd=" << config.max_lpd
         << " olig_bg=" << config.olig_bg
-        << " pop_size=" << config.pop_size
-        << " num_motifs=" << config.num_motifs << '\n';
+        << " pop_size_per_island=" << config.pop_size
+        << " islands=" << config.num_motifs << '\n';
 
     const auto foreground = read_fasta(
         config.fg_path,
@@ -2318,10 +2361,15 @@ int train_impl(const TrainParams& params, TrainResult* result) {
         << '\n';
 
     Rng rng(config.seed);
-    auto population = initialize_population(encoded, background, config, rng, log);
-    run_search(population, feature_pool, encoded, background, config, rng, log);
-    sort_population(population);
-    write_outputs(population, encoded, background, config, result);
+    auto winners = run_island_searches(
+        feature_pool,
+        encoded,
+        background,
+        config,
+        rng,
+        log
+    );
+    write_outputs(winners, encoded, background, config, result);
     log << "Pipeline completed successfully!\n";
     return 0;
 }

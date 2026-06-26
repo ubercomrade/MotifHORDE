@@ -15,6 +15,8 @@ from motifhorde.pipeline import (
     _deduplicate_final_motifs,
     _deduplicate_matches,
     _filter_similar_matches,
+    _format_elapsed,
+    _format_log_params,
     _is_similar_value,
     _select_nonredundant_motifs,
     _sort_comparisons,
@@ -67,6 +69,16 @@ def stats(names: list[str], metric_values: list[float]) -> dict[str, dict[str, f
         }
         for name, value in zip(names, metric_values)
     }
+
+
+def test_log_param_format_is_stable_and_compact():
+    assert _format_log_params({"length": 6, "lpd": 10}) == "length:6,lpd:10"
+    assert _format_log_params({"z": 1, "a": 2}) == "a:2,z:1"
+
+
+def test_elapsed_format_uses_one_decimal_second():
+    assert _format_elapsed(7.14) == "7.1s"
+    assert _format_elapsed(7.16) == "7.2s"
 
 
 def test_similarity_thresholds_are_inclusive():

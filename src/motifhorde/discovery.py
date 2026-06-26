@@ -691,8 +691,8 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         seed: int | None = None,
         pop_size: int = 30,
         num_motifs: int = 20,
-        generations: int | None = 50,
-        mutation_attempts: int | None = 50,
+        generations: int | None = 30,
+        mutation_attempts: int | None = 20,
         stale_generations: int | None = 10,
     ) -> None:
         super().__init__(name="sitega")
@@ -700,6 +700,8 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         self.threads = threads
         self.seed = seed
         # SiteGA tuning knobs are intentionally not exposed via CLI.
+        # pop_size is the number of individuals per island.
+        # num_motifs is the default number of islands / SiteGA motifs to request.
         self.pop_size = pop_size
         self.num_motifs = num_motifs
         self.generations = generations

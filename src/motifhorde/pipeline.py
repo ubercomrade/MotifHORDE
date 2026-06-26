@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import os
 import tempfile
+import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import joblib
@@ -24,8 +26,21 @@ from .comparison import (
 from .discovery import MotifDiscoveryTool
 from .evaluation import Bootstrapper, PerformanceEvaluator
 from .io import read_fasta, write_meme
+from .log_format import (
+    format_elapsed as _format_elapsed,
+    format_log_params as _format_log_params,
+)
 
 VALIDATION_METRICS = ("auPRC", "auROC", "pauPRC", "pauROC")
+
+logger = logging.getLogger("pipeline")
+input_logger = logging.getLogger("input")
+output_logger = logging.getLogger("output")
+bootstrap_compare_logger = logging.getLogger("bootstrap.compare")
+final_discovery_logger = logging.getLogger("final.discovery")
+final_match_logger = logging.getLogger("final.match")
+final_dedup_logger = logging.getLogger("final.dedup")
+motif_logger = logging.getLogger("motif")
 
 
 class DeNovoPipeline:
@@ -58,9 +73,21 @@ class DeNovoPipeline:
         discovery_params: Dict[str, Iterable[Any]],
         metric: str,
     ) -> None:
+        start_time = time.perf_counter()
         bootstrap_dir, motifs_dir = self._prepare_output_dirs(output_dir)
+        output_logger.info(
+            "prepared | bootstrap_dir=%s | motifs_dir=%s",
+            bootstrap_dir,
+            motifs_dir,
+        )
         peaks, background, promoters = self._read_sequences(
             foreground_path, background_path, promoters_path
+        )
+        input_logger.info(
+            "loaded | foreground=%d | background=%d | promoters=%d",
+            len(peaks["lengths"]),
+            len(background["lengths"]),
+            len(promoters["lengths"]),
         )
 
         statistics, bootstrap_motifs = self._run_bootstrap(
@@ -72,7 +99,10 @@ class DeNovoPipeline:
             bootstrap_motifs, discovery_params, peaks, statistics, metric
         )
         if bootstrap_records is None:
-            print("No motif comparisons were made; exiting.")
+            logger.info(
+                "done | status=no_motif_comparisons | elapsed=%s",
+                _format_elapsed(time.perf_counter() - start_time),
+            )
             return
 
         final_motifs, final_info, final_stats = self._select_final_motifs(
@@ -86,6 +116,8 @@ class DeNovoPipeline:
             output_dir=output_dir,
             discovery_params=discovery_params,
         )
+        dedup_candidates = len(final_motifs)
+        final_dedup_logger.info("start | candidates=%d", dedup_candidates)
         final_motifs, final_info, final_stats = _deduplicate_final_motifs(
             final_motifs,
             final_info,
@@ -94,8 +126,17 @@ class DeNovoPipeline:
             self.comparator,
             peaks,
         )
+        final_dedup_logger.info(
+            "done | candidates=%d | kept=%d | removed=%d",
+            dedup_candidates,
+            len(final_motifs),
+            dedup_candidates - len(final_motifs),
+        )
         self._save_results(
             final_motifs, final_info, final_stats, motifs_dir, metric, promoters
+        )
+        logger.info(
+            "done | elapsed=%s", _format_elapsed(time.perf_counter() - start_time)
         )
 
     def _prepare_output_dirs(self, output_dir: str) -> Tuple[str, str]:
@@ -161,13 +202,22 @@ class DeNovoPipeline:
     ) -> None:
         models_dir = os.path.join(bootstrap_dir, "models")
         os.makedirs(models_dir, exist_ok=True)
-        print(f"Saving {len(motifs)} bootstrap motifs to {models_dir}...")
         for index, motif in enumerate(motifs):
             joblib.dump(
                 motif,
                 os.path.join(models_dir, f"{index:04d}_{_safe_name(motif.name)}.pkl"),
             )
-        self._save_json(statistics, os.path.join(bootstrap_dir, "statistics.json"))
+        output_logger.info(
+            "saved | type=bootstrap_models | count=%d | dir=%s",
+            len(motifs),
+            models_dir,
+        )
+        statistics_path = os.path.join(bootstrap_dir, "statistics.json")
+        self._save_json(statistics, statistics_path)
+        output_logger.info(
+            "saved | type=bootstrap_statistics | path=%s",
+            statistics_path,
+        )
 
     def _compare_bootstrap_motifs(
         self,
@@ -178,12 +228,28 @@ class DeNovoPipeline:
         metric: str,
     ) -> Optional[pd.DataFrame]:
         records = []
+        param_sets = 0
+        matched_param_sets = 0
 
         for current_params in _iter_param_grid(discovery_params):
+            param_sets += 1
+            params_text = _format_log_params(current_params)
             odd_motifs, even_motifs = _bootstrap_motifs_for_params(
                 bootstrap_motifs, current_params
             )
+            bootstrap_compare_logger.info(
+                "start | params=%s | odd=%d | even=%d",
+                params_text,
+                len(odd_motifs),
+                len(even_motifs),
+            )
             if not odd_motifs or not even_motifs:
+                bootstrap_compare_logger.info(
+                    "skipped | params=%s | reason=missing_odd_or_even | odd=%d | even=%d",
+                    params_text,
+                    len(odd_motifs),
+                    len(even_motifs),
+                )
                 continue
 
             odd_selected = _select_nonredundant_motifs(
@@ -192,20 +258,55 @@ class DeNovoPipeline:
             even_selected = _select_nonredundant_motifs(
                 even_motifs, statistics, metric, self.comparator, peaks
             )
+            bootstrap_compare_logger.info(
+                "selected | params=%s | odd_selected=%d | even_selected=%d",
+                params_text,
+                len(odd_selected),
+                len(even_selected),
+            )
             if not odd_selected or not even_selected:
+                bootstrap_compare_logger.info(
+                    "skipped | params=%s | reason=no_nonredundant_motifs | odd_selected=%d | even_selected=%d",
+                    params_text,
+                    len(odd_selected),
+                    len(even_selected),
+                )
                 continue
 
-            frame = self.comparator.compare(
+            raw_frame = self.comparator.compare(
                 odd_selected, even_selected, sequences=peaks
             )
-            frame = _filter_similar_matches(frame, self.comparator)
-            if frame.empty:
+            similar_frame = _filter_similar_matches(raw_frame, self.comparator)
+            if similar_frame.empty:
+                bootstrap_compare_logger.info(
+                    "skipped | params=%s | reason=no_pairs_passing_threshold | raw_pairs=%d | passed=0",
+                    params_text,
+                    len(raw_frame),
+                )
                 continue
-            frame = _deduplicate_matches(_sort_comparisons(frame, self.comparator))
+            sorted_frame = _sort_comparisons(similar_frame, self.comparator)
+            deduped_frame = _deduplicate_matches(sorted_frame)
+            bootstrap_compare_logger.info(
+                "done | params=%s | raw_pairs=%d | passed=%d | deduped=%d",
+                params_text,
+                len(raw_frame),
+                len(similar_frame),
+                len(deduped_frame),
+            )
+            frame = deduped_frame.copy()
             for key, value in current_params.items():
                 frame[key] = value
             frame = _attach_average_metrics(frame, statistics)
             records.append(frame)
+            matched_param_sets += 1
+
+        record_count = sum(len(frame) for frame in records)
+        bootstrap_compare_logger.info(
+            "complete | param_sets=%d | matched_param_sets=%d | records=%d",
+            param_sets,
+            matched_param_sets,
+            record_count,
+        )
 
         if not records:
             return None
@@ -238,24 +339,49 @@ class DeNovoPipeline:
             if metric not in group.columns:
                 raise ValueError(f"Comparison must contain {metric}")
             group = group.sort_values(metric, ascending=False)
+            params_text = _format_log_params(current_params)
+            requested_motifs = self.number_of_motifs * 2
 
             with tempfile.TemporaryDirectory(
                 dir=os.path.join(output_dir, self.discovery_tool.name)
             ) as tmp_dir:
+                final_discovery_logger.info(
+                    "start | params=%s | requested_motifs=%d",
+                    params_text,
+                    requested_motifs,
+                )
+                discovery_start = time.perf_counter()
                 full_motifs = self.discovery_tool.discover(
                     foreground_path,
                     background_path,
                     tmp_dir,
-                    number_of_motifs=self.number_of_motifs * 2,
+                    number_of_motifs=requested_motifs,
                     **current_params,
+                )
+                final_discovery_logger.info(
+                    "done | params=%s | requested_motifs=%d | motifs_found=%d | elapsed=%s",
+                    params_text,
+                    requested_motifs,
+                    len(full_motifs),
+                    _format_elapsed(time.perf_counter() - discovery_start),
                 )
 
                 assigned = set()
-                for _, record in group.iterrows():
+                matched = 0
+                unmatched = 0
+                already_assigned = 0
+                candidate_pairs = len(group)
+                final_match_logger.info(
+                    "start | params=%s | candidate_pairs=%d",
+                    params_text,
+                    candidate_pairs,
+                )
+                for record_index, (_, record) in enumerate(group.iterrows()):
                     remaining = [
                         motif for motif in full_motifs if motif.name not in assigned
                     ]
                     if not remaining:
+                        already_assigned = candidate_pairs - record_index
                         break
 
                     best = self._select_best_full_motif(
@@ -266,14 +392,10 @@ class DeNovoPipeline:
                         peaks,
                     )
                     if best is None:
-                        print(
-                            f"Params {current_params}: No match found for motifs {record['query']}, {record['target']}"
-                        )
+                        unmatched += 1
                         continue
 
-                    print(
-                        f"Params {current_params}: Best match for {record['query']} and {record['target']} is {best.name}"
-                    )
+                    matched += 1
                     assigned.add(best.name)
                     _ensure_pfm(best, promoters)
                     final_motifs.append(best)
@@ -282,6 +404,14 @@ class DeNovoPipeline:
                         name: record[name]
                         for name in ["auPRC", "auROC", "pauPRC", "pauROC"]
                     }
+                final_match_logger.info(
+                    "done | params=%s | candidate_pairs=%d | matched=%d | unmatched=%d | already_assigned=%d",
+                    params_text,
+                    candidate_pairs,
+                    matched,
+                    unmatched,
+                    already_assigned,
+                )
 
         return final_motifs, final_info, final_stats
 
@@ -359,31 +489,41 @@ class DeNovoPipeline:
 
         models_dir = os.path.join(motifs_dir, "models")
         os.makedirs(models_dir, exist_ok=True)
-        print(f"Saving {len(motifs_sorted)} individual models to {models_dir}...")
 
         pfms = [_ensure_pfm(motif, promoters) for motif in motifs_sorted]
         metadata = [(motif.name, motif.length) for motif in motifs_sorted]
-        write_meme(
-            pfms, metadata, os.path.join(models_dir, "all_motifs_in_pfm_form.meme")
-        )
+        meme_path = os.path.join(models_dir, "all_motifs_in_pfm_form.meme")
+        write_meme(pfms, metadata, meme_path)
 
         for rank, motif in enumerate(motifs_sorted, start=1):
             joblib.dump(
                 motif,
                 os.path.join(models_dir, f"{rank:03d}_{_safe_name(motif.name)}.pkl"),
             )
+        output_logger.info(
+            "saved | type=final_models | count=%d | dir=%s",
+            len(motifs_sorted),
+            models_dir,
+        )
+        output_logger.info("saved | type=final_meme | path=%s", meme_path)
 
-        self._save_json(final_stats, os.path.join(motifs_dir, "statistics.json"))
+        statistics_path = os.path.join(motifs_dir, "statistics.json")
+        self._save_json(final_stats, statistics_path)
+        output_logger.info("saved | type=final_statistics | path=%s", statistics_path)
 
         for index, (name, params) in enumerate(info_sorted, start=1):
             stats = final_stats[stats_key(name, params)]
-            params_str = ", ".join(f"{key}={params[key]}" for key in sorted(params))
             parts = [
+                f"rank={index}",
+                f"name={name}",
+                f"params={_format_log_params(params)}",
+            ]
+            parts.extend(
                 f"{key}={stats[key]:.4f}"
                 for key in ["auPRC", "auROC", "pauPRC", "pauROC"]
                 if key in stats
-            ]
-            print(f"Motif {index}: {name}; {params_str}; " + "; ".join(parts))
+            )
+            motif_logger.info(" | ".join(parts))
 
     @staticmethod
     def _save_json(data: Dict, path: str) -> None:
