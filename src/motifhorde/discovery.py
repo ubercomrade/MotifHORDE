@@ -691,8 +691,8 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         seed: int | None = None,
         pop_size: int = 30,
         num_motifs: int = 20,
-        generations: int | None = 30,
-        mutation_attempts: int | None = 20,
+        generations: int | None = 40,
+        mutation_attempts: int | None = 30,
         stale_generations: int | None = 10,
     ) -> None:
         super().__init__(name="sitega")
