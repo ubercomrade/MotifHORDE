@@ -53,6 +53,9 @@ function _cli_settings()
         "--streme-command"
         arg_type = String
         default = nothing
+        "--sitega-command"
+        arg_type = String
+        default = nothing
         "--meme-command"
         arg_type = String
         default = nothing
@@ -141,7 +144,9 @@ function _setup_tool(args)
             threads=1,
         )
     elseif args["tool"] == "sitega"
-        return SitegaDiscoveryTool(; threads=1, seed=args["seed"])
+        return SitegaDiscoveryTool(;
+            command=args["sitega-command"], threads=1, seed=args["seed"]
+        )
     end
     return throw(ArgumentError("Unknown discovery tool: $(args["tool"])"))
 end
@@ -166,20 +171,24 @@ function _validate_cli!(args)
     args["metric"] in VALIDATION_METRICS ||
         throw(ArgumentError("Unsupported validation metric: $(args["metric"])"))
     args["nmotifs"] > 0 || throw(ArgumentError("--nmotifs must be positive"))
+    isfinite(args["fpr"]) && 0 <= args["fpr"] <= 1 ||
+        throw(ArgumentError("--fpr must be finite and between 0 and 1"))
     args["jobs"] == -1 ||
         args["jobs"] > 0 ||
         throw(ArgumentError("--jobs must be -1 or a positive integer"))
-    all(>(0), _setup_params(args)["length"]) ||
-        throw(ArgumentError("motif lengths must be positive"))
+    lengths = _setup_params(args)["length"]
+    !isempty(lengths) && all(>(0), lengths) ||
+        throw(ArgumentError("motif lengths must be positive and non-empty"))
     if args["tool"] == "sitega"
         1 <= args["lpd"] <= 6 || throw(ArgumentError("--lpd must be in 1:6"))
-        all(>(0), _setup_params(args)["features"]) ||
-            throw(ArgumentError("SiteGA feature counts must be positive"))
+        features = _setup_params(args)["features"]
+        !isempty(features) && all(>(0), features) ||
+            throw(ArgumentError("SiteGA feature counts must be positive and non-empty"))
     end
     return args
 end
 
 function configure_logging(verbose::Bool)
     level = verbose ? Logging.Info : Logging.Warn
-    return global_logger(ConsoleLogger(stdout, level))
+    return global_logger(ConsoleLogger(stderr, level))
 end

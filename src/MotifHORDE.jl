@@ -5,9 +5,6 @@ using JSON3
 using Logging
 using Mimosa: Mimosa
 using Printf
-using Random
-using Sitega
-using Statistics
 
 include("models.jl")
 include("fasta.jl")
@@ -20,7 +17,7 @@ include("pipeline.jl")
 include("cli.jl")
 
 function (@main)(arguments::Vector{String}=copy(ARGS))
-    parsed = parse_args(args, _cli_settings())
+    parsed = parse_args(arguments, _cli_settings())
     _validate_cli!(parsed)
     criterion = parsed["comparison-criterion"]
     parsed["comparator"] == "mimosa" ||
@@ -87,6 +84,7 @@ export BootstrapTask,
     build_bootstrap_tasks,
     build_dimont_args,
     build_slim_args,
+    build_sitega_args,
     build_streme_args,
     comparison_column_for_criterion,
     default_threshold_for_criterion,
@@ -98,7 +96,6 @@ export BootstrapTask,
     parameter_grid,
     read_fasta,
     read_model,
-    reconstruct_pfm,
     run_pipeline,
     run_checked,
     select_sequence_rows,

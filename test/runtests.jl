@@ -19,17 +19,7 @@ using MotifHORDE
         @test parsed["lpd"] == 6
         @test parsed["features"] == "10-40-5"
         @test parsed["verbose"] == false
-        @test_throws ArgParse.ArgParseError ArgParse.parse_args(
-            [
-                "foreground.fa",
-                "background.fa",
-                "promoters.fa",
-                "output",
-                "--tool",
-                "unknown",
-            ],
-            MotifHORDE._cli_settings(),
-        )
+        @test_throws ArgumentError MotifHORDE.parse_range("8-20-0")
     end
 
     @testset "FASTA and Jstacs I/O" begin
@@ -91,24 +81,47 @@ using MotifHORDE
         @test MotifHORDE.format_params(Dict("z" => 1, "a" => 2)) == "a-2,z-1"
     end
 
-    @testset "SiteGA package contract" begin
+    @testset "SiteGA process contract" begin
         mktempdir() do directory
             foreground = joinpath(directory, "foreground.fa")
             background = joinpath(directory, "background.fa")
+            output = joinpath(directory, "output")
+            fake = joinpath(directory, "sitega")
             write(foreground, ">x\nACGTACGTACGT\n>y\nTTTTACGTACGT\n")
             write(background, ">x\nTTTTCCCCGGGG\n>y\nGGGGAAAACCCC\n")
+            mkpath(output)
+            model = Mimosa.pwm_from_pfm(
+                Float32[
+                    0.8 0.2 0.2 0.2;
+                    0.1 0.3 0.3 0.3;
+                    0.05 0.25 0.25 0.25;
+                    0.05 0.25 0.25 0.25
+                ];
+                name="external",
+            )
+            MotifHORDE.write_model(joinpath(output, "model"), model)
+            write(
+                fake,
+                raw"""#!/bin/sh
+                set -eu
+                output=""
+                manifest=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --output) output="$2"; shift 2 ;;
+                        --manifest) manifest="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                printf '%s\n' '{"schema_version":1,"status":"success","message":"ok","models":[{"model_file":"model","model_type":"pwm","length":4,"name":"Sitega-1"}]}' > "$manifest"
+                """,
+            )
+            chmod(fake, 0o755)
             models = MotifHORDE.discover(
-                MotifHORDE.SitegaDiscoveryTool(
-                    seed=7,
-                    population=4,
-                    generations=1,
-                    mutation_attempts=1,
-                    stale_generations=1,
-                    features=4,
-                ),
+                MotifHORDE.SitegaDiscoveryTool(command=fake, threads=1, seed=7),
                 foreground,
                 background,
-                joinpath(directory, "output"),
+                output,
                 1;
                 length=4,
                 lpd=3,

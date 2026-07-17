@@ -192,27 +192,31 @@ function run_pipeline(
     for record in records
         params = record.params
         full_dir = mktempdir(tool_dir; prefix="final_")
-        full_models = discover(
-            tool,
-            foreground_path,
-            background_path,
-            full_dir,
-            config.number_of_motifs * 2;
-            _keyword_params(params)...,
-        )
-        best = _best_full_model(
-            full_models,
-            record.query,
-            record.target,
-            bootstrap_models,
-            comparator,
-            foreground,
-        )
-        best === nothing && continue
-        key = "$(motif_name(best))_$(format_params(params))"
-        push!(final_models, best)
-        push!(final_info, (motif_name(best), params))
-        final_statistics[key] = record.validation
+        try
+            full_models = discover(
+                tool,
+                foreground_path,
+                background_path,
+                full_dir,
+                config.number_of_motifs * 2;
+                _keyword_params(params)...,
+            )
+            best = _best_full_model(
+                full_models,
+                record.query,
+                record.target,
+                bootstrap_models,
+                comparator,
+                foreground,
+            )
+            best === nothing && continue
+            key = "$(motif_name(best))_$(format_params(params))"
+            push!(final_models, best)
+            push!(final_info, (motif_name(best), params))
+            final_statistics[key] = record.validation
+        finally
+            rm(full_dir; recursive=true, force=true)
+        end
     end
     final_models, final_info, final_statistics = deduplicate_final_motifs(
         final_models, final_info, final_statistics, metric, comparator, foreground

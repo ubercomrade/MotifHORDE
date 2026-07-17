@@ -1,6 +1,7 @@
 """FASTA and interoperable model output at the I/O boundary."""
 
 function read_fasta(path::AbstractString; max_sequences::Integer=1_000_000)
+    max_sequences > 0 || throw(ArgumentError("max_sequences must be positive"))
     isfile(path) || throw(ArgumentError("FASTA file not found: $path"))
     filesize(path) == 0 && return (Mimosa.empty_sequence_batch(), String[])
     return Mimosa.read_fasta(path; max_sequences=Int(max_sequences))
@@ -27,7 +28,8 @@ function write_jstacs_fasta(
     position_tag::AbstractString="position",
     value_tag::AbstractString="value",
 )
-    if !isfile(input_path) || filesize(input_path) == 0
+    isfile(input_path) || throw(ArgumentError("FASTA file not found: $input_path"))
+    if filesize(input_path) == 0
         open(output_path, "w") do _
         end
         return output_path

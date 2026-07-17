@@ -4,12 +4,16 @@ abstract type MotifDiscoveryTool end
 
 discover(::MotifDiscoveryTool, args...; kwargs...) = throw(MethodError(discover, args))
 
+function _resolve_length(length, kwargs)
+    width = length === nothing ? _require_length(kwargs) : Int(length)
+    width > 0 || throw(ArgumentError("Parameter 'length' must be positive."))
+    return width
+end
+
 function _require_length(kwargs)
     haskey(kwargs, :length) ||
         throw(ArgumentError("Parameter 'length' is required for discovery."))
-    length = Int(kwargs[:length])
-    length > 0 || throw(ArgumentError("Parameter 'length' must be positive."))
-    return length
+    return Int(kwargs[:length])
 end
 
 function _expected_length(model, expected::Union{Nothing,Int})
@@ -30,10 +34,12 @@ function _read_indexed_models(
         model = try
             read_model(path, format; index=index)
         catch error
-            error isa BoundsError || error isa ArgumentError || break
-            break
+            error isa BoundsError && break
+            occursin("motif index", sprint(showerror, error)) && break
+            rethrow()
         end
-        _expected_length(model, expected_length) || continue
+        _expected_length(model, expected_length) ||
+            throw(ArgumentError("Model length does not match requested length in $path"))
         push!(models, rename_model(model, "$prefix-$(length(models) + 1)"))
     end
     return models
@@ -98,9 +104,9 @@ function StremeDiscoveryTool(; command=nothing)
 end
 
 function build_streme_args(
-    command, foreground, background, output_dir, length, number_of_motifs
+    command, foreground, background, length, number_of_motifs; seed=nothing
 )
-    return String[
+    args = String[
         command,
         "--p",
         foreground,
@@ -116,6 +122,8 @@ function build_streme_args(
         string(number_of_motifs),
         "--text",
     ]
+    seed === nothing || append!(args, ["--seed", string(seed)])
+    return args
 end
 
 function discover(
@@ -125,25 +133,30 @@ function discover(
     output_dir::AbstractString,
     number_of_motifs::Integer;
     length=nothing,
+    seed=nothing,
     kwargs...,
 )
-    width = length === nothing ? _require_length((; kwargs...)) : Int(length)
+    width = _resolve_length(length, (; kwargs...))
     mkpath(output_dir)
     command = resolve_command(
         tool.command, DEFAULT_STREME_COMMAND; env_var="HORDEMOTIFS_STREME_COMMAND"
     )
     result = run_checked(
         build_streme_args(
-            command, foreground, background, output_dir, width, Int(number_of_motifs)
+            command, foreground, background, width, Int(number_of_motifs); seed=seed
         ),
     )
     path = joinpath(output_dir, "motifs.meme")
     open(path, "w") do io
         return write(io, result.stdout)
     end
-    return _read_indexed_models(
+    isfile(path) && filesize(path) > 0 ||
+        throw(ArgumentError("STREME did not produce a non-empty MEME report"))
+    models = _read_indexed_models(
         path, :meme, "Streme", Int(number_of_motifs); expected_length=width
     )
+    isempty(models) && throw(ArgumentError("STREME produced no compatible models"))
+    return models
 end
 
 struct MemeDiscoveryTool <: MotifDiscoveryTool
@@ -177,7 +190,13 @@ function MemeDiscoveryTool(;
 end
 
 function build_meme_args(
-    tool::MemeDiscoveryTool, command, foreground, background, length, number_of_motifs
+    tool::MemeDiscoveryTool,
+    command,
+    foreground,
+    background,
+    length,
+    number_of_motifs;
+    seed=tool.seed,
 )
     args = String[
         command,
@@ -201,7 +220,7 @@ function build_meme_args(
     for (flag, value) in (
         ("-minsites", tool.minsites),
         ("-maxsites", tool.maxsites),
-        ("-seed", tool.seed),
+        ("-seed", seed),
         ("-p", tool.threads),
     )
         value === nothing || append!(args, [flag, string(value)])
@@ -216,15 +235,18 @@ function discover(
     output_dir::AbstractString,
     number_of_motifs::Integer;
     length=nothing,
+    seed=tool.seed,
     kwargs...,
 )
-    width = length === nothing ? _require_length((; kwargs...)) : Int(length)
+    width = _resolve_length(length, (; kwargs...))
     mkpath(output_dir)
     command = resolve_command(
         tool.command, DEFAULT_MEME_COMMAND; env_var="HORDEMOTIFS_MEME_COMMAND"
     )
     result = run_checked(
-        build_meme_args(tool, command, foreground, background, width, Int(number_of_motifs))
+        build_meme_args(
+            tool, command, foreground, background, width, Int(number_of_motifs); seed=seed
+        ),
     )
     path = joinpath(output_dir, "motifs.meme")
     if !isempty(result.stdout)
@@ -233,10 +255,16 @@ function discover(
         end
     elseif isfile(joinpath(output_dir, "meme.txt"))
         path = joinpath(output_dir, "meme.txt")
+    else
+        throw(ArgumentError("MEME did not produce a report"))
     end
-    return _read_indexed_models(
+    isfile(path) && filesize(path) > 0 ||
+        throw(ArgumentError("MEME produced an empty report"))
+    models = _read_indexed_models(
         path, :meme, "Meme", Int(number_of_motifs); expected_length=width
     )
+    isempty(models) && throw(ArgumentError("MEME produced no compatible models"))
+    return models
 end
 
 struct BammDiscoveryTool <: MotifDiscoveryTool
@@ -274,14 +302,23 @@ function discover(
     number_of_motifs::Integer;
     length=nothing,
     order=2,
+    seed=nothing,
     kwargs...,
 )
-    width = length === nothing ? _require_length((; kwargs...)) : Int(length)
+    width = _resolve_length(length, (; kwargs...))
     mkpath(output_dir)
     streme = StremeDiscoveryTool(; command=tool.streme_command)
-    discover(streme, foreground, background, output_dir, number_of_motifs; length=width)
+    discover(
+        streme,
+        foreground,
+        background,
+        output_dir,
+        number_of_motifs;
+        length=width,
+        seed=seed,
+    )
     meme_path = joinpath(output_dir, "motifs.meme")
-    isfile(meme_path) || return Mimosa.AbstractMotifModel[]
+    isfile(meme_path) || throw(ArgumentError("STREME did not produce $meme_path"))
     bamm = resolve_command(
         tool.bamm_command, DEFAULT_BAMM_COMMAND; env_var="HORDEMOTIFS_BAMM_COMMAND"
     )
@@ -291,11 +328,13 @@ function discover(
     models = Mimosa.AbstractMotifModel[]
     for index in 1:Int(number_of_motifs)
         path = joinpath(output_dir, "bamm_motif_$(index).ihbcp")
-        isfile(path) || continue
+        isfile(path) || break
         model = read_model(path, :bamm; order=Int(order))
-        _expected_length(model, width) || continue
+        _expected_length(model, width) ||
+            throw(ArgumentError("BaMM model length does not match requested length"))
         push!(models, rename_model(model, "Bamm-$(length(models) + 1)"))
     end
+    isempty(models) && throw(ArgumentError("BaMM produced no models"))
     return models
 end
 
@@ -489,12 +528,13 @@ function _discover_jstacs(
         model = try
             read_model(path, format)
         catch error
-            @warn "Skipping invalid Jstacs output" path exception=(error, catch_backtrace())
-            continue
+            throw(ArgumentError("Invalid Jstacs model $path: $(sprint(showerror, error))"))
         end
-        _expected_length(model, width) || continue
+        _expected_length(model, width) ||
+            throw(ArgumentError("Jstacs model length does not match requested length"))
         push!(models, rename_model(model, "$prefix-$(length(models) + 1)"))
     end
+    isempty(models) && throw(ArgumentError("Jstacs produced no models"))
     return models
 end
 
@@ -546,7 +586,7 @@ function discover(
     length=nothing,
     kwargs...,
 )
-    width = length === nothing ? _require_length((; kwargs...)) : Int(length)
+    width = _resolve_length(length, (; kwargs...))
     return _discover_jstacs(
         tool, :dimont, "Dimont", foreground, output_dir, Int(number_of_motifs), width
     )
@@ -561,13 +601,14 @@ function discover(
     length=nothing,
     kwargs...,
 )
-    width = length === nothing ? _require_length((; kwargs...)) : Int(length)
+    width = _resolve_length(length, (; kwargs...))
     return _discover_jstacs(
         tool, :slim, "Slim", foreground, output_dir, Int(number_of_motifs), width
     )
 end
 
 struct SitegaDiscoveryTool <: MotifDiscoveryTool
+    command::Union{Nothing,String}
     threads::Union{Nothing,Int}
     seed::Union{Nothing,Int}
     population::Int
@@ -576,7 +617,9 @@ struct SitegaDiscoveryTool <: MotifDiscoveryTool
     stale_generations::Int
     features::Union{Nothing,Int}
 end
+
 function SitegaDiscoveryTool(;
+    command=nothing,
     threads=nothing,
     seed=nothing,
     population=100,
@@ -586,6 +629,7 @@ function SitegaDiscoveryTool(;
     features=nothing,
 )
     return SitegaDiscoveryTool(
+        command === nothing ? nothing : String(command),
         threads,
         seed,
         Int(population),
@@ -594,6 +638,55 @@ function SitegaDiscoveryTool(;
         Int(stale_generations),
         features === nothing ? nothing : Int(features),
     )
+end
+
+function build_sitega_args(
+    command,
+    foreground,
+    background,
+    output_dir,
+    manifest,
+    width,
+    lpd,
+    motifs,
+    seed,
+    threads,
+    population,
+    generations,
+    mutation_attempts,
+    stale_generations,
+    features,
+)
+    args = String[
+        command,
+        "--foreground",
+        foreground,
+        "--background",
+        background,
+        "--output",
+        output_dir,
+        "--manifest",
+        manifest,
+        "--length",
+        string(width),
+        "--lpd",
+        string(lpd),
+        "--motifs",
+        string(motifs),
+        "--population",
+        string(population),
+        "--generations",
+        string(generations),
+        "--mutation-attempts",
+        string(mutation_attempts),
+        "--stale-generations",
+        string(stale_generations),
+        "--features",
+        string(features),
+    ]
+    seed === nothing || append!(args, ["--seed", string(seed)])
+    threads === nothing || append!(args, ["--threads", string(threads)])
+    return args
 end
 
 function _manifest_value(manifest, key::AbstractString)
@@ -617,17 +710,24 @@ function _read_sitega_manifest(path, output_dir, requested, width)
     for (index, entry) in enumerate(entries)
         length(models) >= requested && break
         model_path = String(_manifest_value(entry, "model_file"))
-        candidate = normpath(joinpath(output_dir, model_path))
-        startswith(
-            candidate, normpath(output_dir) * string(Base.Filesystem.path_separator)
+        root = abspath(output_dir)
+        candidate = abspath(joinpath(root, model_path))
+        relative = relpath(candidate, root)
+        (
+            relative != ".." &&
+            !startswith(relative, ".." * string(Base.Filesystem.path_separator))
         ) || throw(ArgumentError("SiteGA manifest model path escapes output directory."))
-        isfile(candidate) || throw(ArgumentError("SiteGA model file not found: $candidate"))
+        (isfile(candidate) || isdir(candidate)) ||
+            throw(ArgumentError("SiteGA model file not found: $candidate"))
         model_type = Symbol(lowercase(String(_manifest_value(entry, "model_type"))))
         model = read_model(candidate, model_type)
+        _model_type(model) == model_type ||
+            throw(ArgumentError("SiteGA manifest model type disagrees with model file."))
         declared_length = Int(_manifest_value(entry, "length"))
         declared_length == motif_length(model) ||
             throw(ArgumentError("SiteGA manifest length disagrees with model file."))
-        declared_length == width || continue
+        declared_length == width ||
+            throw(ArgumentError("SiteGA manifest model length does not match request."))
         name = String(get(entry, "name", "Sitega-$index"))
         push!(models, rename_model(model, name))
     end
@@ -646,48 +746,35 @@ function discover(
     seed=tool.seed,
     kwargs...,
 )
-    width = length === nothing ? _require_length((; kwargs...)) : Int(length)
+    width = _resolve_length(length, (; kwargs...))
     mkpath(output_dir)
     manifest = joinpath(output_dir, "sitega.manifest.json")
-    options = Sitega.SearchOptions(;
-        motif_length=width,
-        motifs=Int(number_of_motifs),
-        max_lpd=Int(lpd),
-        seed=seed === nothing ? 0 : Int(seed),
-        threads=tool.threads === nothing ? 1 : Int(tool.threads),
-        population=tool.population,
-        generations=if tool.generations === nothing
-            max(6, min(24, 8 + width ÷ 2))
-        else
-            tool.generations
-        end,
-        mutation_attempts=tool.mutation_attempts,
-        stale_generations=tool.stale_generations,
-        features=features === nothing ? min(28, 16 * (width - 1)) : Int(features),
-    )
-    result = Sitega.discover(foreground, background; options=options)
-    entries = Vector{Dict{String,Any}}()
-    for (index, model) in enumerate(result.models)
-        model_path = joinpath(output_dir, "sitega_model_$index.mat")
-        Sitega.write_model(model_path, model)
-        push!(
-            entries,
-            Dict(
-                "model_file" => basename(model_path),
-                "model_type" => "sitega",
-                "length" => width,
-                "name" => model.name,
-            ),
-        )
-    end
-    JSON3.write(
-        manifest,
-        Dict(
-            "schema_version" => 1,
-            "status" => "success",
-            "message" => "ok",
-            "models" => entries,
+    rm(manifest; force=true)
+    command = resolve_command(tool.command, "sitega"; env_var="HORDEMOTIFS_SITEGA_COMMAND")
+    generations =
+        tool.generations === nothing ? max(6, min(24, 8 + width ÷ 2)) : tool.generations
+    feature_count = features === nothing ? max(1, min(28, 16 * (width - 1))) : Int(features)
+    run_checked(
+        build_sitega_args(
+            command,
+            foreground,
+            background,
+            output_dir,
+            manifest,
+            width,
+            lpd,
+            number_of_motifs,
+            seed,
+            tool.threads,
+            tool.population,
+            generations,
+            tool.mutation_attempts,
+            tool.stale_generations,
+            feature_count,
         ),
     )
-    return _read_sitega_manifest(manifest, output_dir, Int(number_of_motifs), width)
+    isfile(manifest) || throw(ArgumentError("SiteGA manifest not found: $manifest"))
+    models = _read_sitega_manifest(manifest, output_dir, Int(number_of_motifs), width)
+    isempty(models) && throw(ArgumentError("SiteGA manifest contains no compatible models"))
+    return models
 end

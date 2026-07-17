@@ -103,7 +103,7 @@ end
 function _raw_comparison(query, target, sequences, comparator)
     sequences === nothing &&
         throw(ArgumentError("Mimosa profile comparison requires sequences."))
-    metric = comparator isa UniversalMotifComparator ? comparator.metric : :co
+    metric = comparator.metric
     search_range = comparator isa UniversalMotifComparator ? comparator.search_range : 10
     return Mimosa.compare(
         query, target, sequences; metric=metric, search_range=search_range
@@ -115,11 +115,7 @@ function _comparison_rows(query, targets, sequences, comparator)
     for target in targets
         push!(raw, _raw_comparison(query, target, sequences, comparator))
     end
-    null_distribution = if comparator isa TomtomComparator
-        comparator.null_distribution
-    else
-        comparator.null_distribution
-    end
+    null_distribution = comparator.null_distribution
     if null_distribution !== nothing
         distribution = Mimosa.loadnull(null_distribution)
         annotated = Mimosa.annotate_results(raw, distribution)

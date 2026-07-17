@@ -23,8 +23,12 @@ end
 struct PerformanceEvaluator
     background_type::Symbol
 end
+
 function PerformanceEvaluator(; background_type=:sites)
-    return PerformanceEvaluator(Symbol(background_type))
+    type = Symbol(background_type)
+    type in (:sites, :peaks) ||
+        throw(ArgumentError("background_type must be :sites or :peaks"))
+    return PerformanceEvaluator(type)
 end
 
 function _roc_pr(labels::Vector{Bool}, scores::Vector{Float32})
@@ -76,6 +80,10 @@ end
 function evaluate(
     evaluator::PerformanceEvaluator, model, positives, negatives, error_threshold::Real
 )
+    evaluator.background_type in (:sites, :peaks) ||
+        throw(ArgumentError("background_type must be :sites or :peaks"))
+    0 < error_threshold <= 1 ||
+        throw(ArgumentError("error_threshold must be between 0 and 1"))
     positive_scores = best_scores(model, positives)
     negative_scores = if evaluator.background_type == :sites
         all_valid_scores(model, negatives)

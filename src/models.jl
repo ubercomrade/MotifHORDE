@@ -1,7 +1,5 @@
 """Thin, explicit aliases around Mimosa.jl's public model API."""
 
-const GenericModel = Mimosa.AbstractMotifModel
-
 function read_model(
     path::AbstractString, model_type::AbstractString="auto"; index::Integer=0, kwargs...
 )
@@ -36,6 +34,12 @@ end
 function rename_model(model::Mimosa.Slim, name::AbstractString)
     return Mimosa.Slim(name, model.representation, model.span, model.motif_length)
 end
+
+_model_type(::Mimosa.PWM) = :pwm
+_model_type(::Mimosa.BaMM) = :bamm
+_model_type(::Mimosa.SiteGA) = :sitega
+_model_type(::Mimosa.Dimont) = :dimont
+_model_type(::Mimosa.Slim) = :slim
 
 motif_name(model::Mimosa.AbstractMotifModel) = String(Mimosa.modelname(model))
 motif_length(model::Mimosa.AbstractMotifModel) = Mimosa.motif_length(model)

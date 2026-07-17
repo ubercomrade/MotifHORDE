@@ -47,6 +47,8 @@ end
 function build_bootstrap_tasks(
     peaks, background, discovery_params, task_root, number_of_motifs, seed
 )
+    Mimosa.nsequences(peaks) >= 2 ||
+        throw(ArgumentError("at least two foreground sequences are required"))
     tasks = BootstrapTask[]
     test_batches = Dict{Int,Mimosa.EncodedSequenceBatch}()
     index = 0
@@ -115,8 +117,11 @@ function _run_tasks(tool, tasks, jobs)
             results[index] = _run_bootstrap_task(tool, tasks[index])
         end
     else
-        Threads.@threads for index in eachindex(tasks)
-            results[index] = _run_bootstrap_task(tool, tasks[index])
+        workers = min(Int(jobs), Threads.nthreads(), length(tasks))
+        @sync for worker in 1:workers
+            Threads.@spawn for index in worker:workers:length(tasks)
+                results[index] = _run_bootstrap_task(tool, tasks[index])
+            end
         end
     end
     return results
@@ -137,22 +142,32 @@ function run_bootstrap(
     task_parent = joinpath(output_dir, "bootstrap")
     mkpath(task_parent)
     task_root = mktempdir(task_parent; prefix="bootstrap_")
-    tasks, test_batches = build_bootstrap_tasks(
-        peaks, background, discovery_params, task_root, number_of_motifs, seed
-    )
-    results = sort!(_run_tasks(tool, tasks, max(1, Int(jobs))); by=result -> result.index)
-    statistics = Dict{String,Any}()
-    motifs = Mimosa.AbstractMotifModel[]
-    for result in results
-        for model in result.motifs
-            model_stats = evaluate(
-                evaluator, model, test_batches[result.index], background, error_threshold
-            )
-            name = "$(motif_name(model))_$(result.params_suffix)_$(result.split)"
-            renamed = rename_model(model, name)
-            statistics[name] = model_stats
-            push!(motifs, renamed)
+    try
+        tasks, test_batches = build_bootstrap_tasks(
+            peaks, background, discovery_params, task_root, number_of_motifs, seed
+        )
+        results = sort!(
+            _run_tasks(tool, tasks, max(1, Int(jobs))); by=result -> result.index
+        )
+        statistics = Dict{String,Any}()
+        motifs = Mimosa.AbstractMotifModel[]
+        for result in results
+            for model in result.motifs
+                model_stats = evaluate(
+                    evaluator,
+                    model,
+                    test_batches[result.index],
+                    background,
+                    error_threshold,
+                )
+                name = "$(motif_name(model))_$(result.params_suffix)_$(result.split)"
+                renamed = rename_model(model, name)
+                statistics[name] = model_stats
+                push!(motifs, renamed)
+            end
         end
+        return statistics, motifs
+    finally
+        rm(task_root; recursive=true, force=true)
     end
-    return statistics, motifs
 end
