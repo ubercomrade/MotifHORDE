@@ -151,6 +151,30 @@ struct ModelWeights {
     double range = 1.0;
 };
 
+int forward_position_for_orientation(
+    const EncodedSequence& sequence,
+    int motif_len,
+    int position,
+    unsigned char orientation
+) {
+    if (orientation == 0) {
+        return position;
+    }
+    return static_cast<int>(sequence.forward.size()) - motif_len - position;
+}
+
+int position_for_orientation(
+    const EncodedSequence& sequence,
+    int motif_len,
+    int forward_position,
+    unsigned char orientation
+) {
+    if (orientation == 0) {
+        return forward_position;
+    }
+    return static_cast<int>(sequence.forward.size()) - motif_len - forward_position;
+}
+
 ModelWeights model_weights_from_stats(
     const Candidate& candidate,
     const EncodedSequences& sequences,
@@ -247,10 +271,10 @@ SearchConfig make_config(const TrainParams& params) {
     config.feature_count = params.size;
     config.olig_bg = params.olig_bg;
     config.max_peak_len = params.max_peak_len;
-    config.pop_size = params.pop_size > 0 ? params.pop_size : kDefaultPopulation;
-    config.pop_size = std::min(config.pop_size, kMaxPopulation);
-    config.num_motifs = params.num_motifs > 0 ? params.num_motifs : kDefaultNumMotifs;
-    config.num_motifs = std::max(1, std::min(config.num_motifs, config.pop_size));
+    config.pop_size = params.pop_size == 0 ? kDefaultPopulation : params.pop_size;
+    config.num_motifs = params.num_motifs == 0
+        ? kDefaultNumMotifs
+        : params.num_motifs;
     config.generations = params.generations;
     config.mutation_attempts = params.mutation_attempts;
     config.stale_generations = params.stale_generations;
@@ -291,6 +315,9 @@ void validate_config(const SearchConfig& config) {
     }
     if (config.pop_size <= 0 || config.pop_size > kMaxPopulation) {
         throw std::runtime_error("pop_size must be in 1..500");
+    }
+    if (config.num_motifs <= 0 || config.num_motifs > kMaxPopulation) {
+        throw std::runtime_error("num_motifs must be in 1..500");
     }
     if (config.generations < 0) {
         throw std::runtime_error("generations must be non-negative");
@@ -720,10 +747,16 @@ std::vector<FeaturePoolEntry> build_feature_pool(
                 for (const auto& sequence : sequences.records) {
                     double sequence_sum = 0.0;
                     int placement_count = 0;
-                    for (int position : sequence.candidate_positions) {
+                    for (int forward_position : sequence.candidate_positions) {
                         for (unsigned char orientation = 0;
                              orientation < 2;
                              ++orientation) {
+                            const int position = position_for_orientation(
+                                sequence,
+                                config.motif_len,
+                                forward_position,
+                                orientation
+                            );
                             double value = 0.0;
                             if (feature_value_for_placement(
                                     feature,
@@ -905,6 +938,8 @@ bool duplicate_candidate(
 
 int sample_weighted_position(
     const EncodedSequence& sequence,
+    int motif_len,
+    unsigned char orientation,
     Rng& rng
 ) {
     const int total = sequence.cumulative_weights.back();
@@ -917,7 +952,12 @@ int sample_weighted_position(
     const std::size_t index = static_cast<std::size_t>(
         std::distance(sequence.cumulative_weights.begin(), it)
     );
-    return sequence.candidate_positions[index];
+    return position_for_orientation(
+        sequence,
+        motif_len,
+        sequence.candidate_positions[index],
+        orientation
+    );
 }
 
 Candidate make_random_candidate(
@@ -931,11 +971,13 @@ Candidate make_random_candidate(
     candidate.orientations.resize(sequence_count);
 
     for (std::size_t index = 0; index < sequence_count; ++index) {
+        candidate.orientations[index] = static_cast<unsigned char>(rng.range(2));
         candidate.positions[index] = sample_weighted_position(
             sequences.records[index],
+            config.motif_len,
+            candidate.orientations[index],
             rng
         );
-        candidate.orientations[index] = static_cast<unsigned char>(rng.range(2));
     }
 
     const int motif_dinuc_count = config.motif_len - 1;
@@ -988,11 +1030,12 @@ double placement_kmer_weight(
     int position,
     unsigned char orientation
 ) {
-    int forward_position = position;
-    if (orientation != 0) {
-        forward_position =
-            static_cast<int>(sequence.forward.size()) - motif_len - position;
-    }
+    const int forward_position = forward_position_for_orientation(
+        sequence,
+        motif_len,
+        position,
+        orientation
+    );
     if (forward_position < 0 ||
         forward_position >= static_cast<int>(sequence.window_weights.size())) {
         return 0.0;
@@ -1413,11 +1456,27 @@ bool try_placement_mutation(
     const int old_position = candidate.positions[static_cast<std::size_t>(sequence_index)];
     const auto old_orientation =
         candidate.orientations[static_cast<std::size_t>(sequence_index)];
-    int new_position = sample_weighted_position(sequence, rng);
     auto new_orientation = static_cast<unsigned char>(rng.range(2));
+    int new_position = sample_weighted_position(
+        sequence,
+        config.motif_len,
+        new_orientation,
+        rng
+    );
 
     if (new_position == old_position && new_orientation == old_orientation) {
         new_orientation = static_cast<unsigned char>(1 - new_orientation);
+        new_position = position_for_orientation(
+            sequence,
+            config.motif_len,
+            forward_position_for_orientation(
+                sequence,
+                config.motif_len,
+                old_position,
+                old_orientation
+            ),
+            new_orientation
+        );
     }
 
     const double old_fit = candidate.fit;
@@ -1553,11 +1612,26 @@ bool choose_kmer_refined_placement(
     };
 
     consider(old_position, old_orientation);
-    consider(old_position, static_cast<unsigned char>(1 - old_orientation));
+    const int old_forward_position = forward_position_for_orientation(
+        sequence,
+        config.motif_len,
+        old_position,
+        old_orientation
+    );
+    const auto opposite_orientation =
+        static_cast<unsigned char>(1 - old_orientation);
+    consider(
+        position_for_orientation(
+            sequence,
+            config.motif_len,
+            old_forward_position,
+            opposite_orientation
+        ),
+        opposite_orientation
+    );
     for (int sample = 0; sample < kPlacementRefineSamples; ++sample) {
-        const int position = sample_weighted_position(sequence, rng);
-        consider(position, 0);
-        consider(position, 1);
+        consider(sample_weighted_position(sequence, config.motif_len, 0, rng), 0);
+        consider(sample_weighted_position(sequence, config.motif_len, 1, rng), 1);
     }
 
     if (!found ||
@@ -1573,6 +1647,7 @@ bool choose_model_refined_placement(
     Candidate& candidate,
     const EncodedSequence& sequence,
     const ModelWeights& weights,
+    int motif_len,
     int sequence_index,
     Rng& rng
 ) {
@@ -1605,11 +1680,26 @@ bool choose_model_refined_placement(
     };
 
     consider(old_position, old_orientation);
-    consider(old_position, static_cast<unsigned char>(1 - old_orientation));
+    const int old_forward_position = forward_position_for_orientation(
+        sequence,
+        motif_len,
+        old_position,
+        old_orientation
+    );
+    const auto opposite_orientation =
+        static_cast<unsigned char>(1 - old_orientation);
+    consider(
+        position_for_orientation(
+            sequence,
+            motif_len,
+            old_forward_position,
+            opposite_orientation
+        ),
+        opposite_orientation
+    );
     for (int sample = 0; sample < kPlacementRefineSamples; ++sample) {
-        const int position = sample_weighted_position(sequence, rng);
-        consider(position, 0);
-        consider(position, 1);
+        consider(sample_weighted_position(sequence, motif_len, 0, rng), 0);
+        consider(sample_weighted_position(sequence, motif_len, 1, rng), 1);
     }
 
     if (!found ||
@@ -1661,6 +1751,7 @@ void refine_placements_after_feature_change(
             candidate,
             sequences.records[static_cast<std::size_t>(sequence_index)],
             weights,
+            config.motif_len,
             sequence_index,
             rng
         ) || refined;

@@ -27,7 +27,7 @@ struct PyTrainParams {
     std::string log_file;
     unsigned long seed = 0;
     int verbose = 0;
-    int num_threads = 0;  // 0 = use OMP_NUM_THREADS env var
+    int num_threads = 0;  // retained for API compatibility; backend is single-threaded
     int pop_size = 0;     // 0 = default 100, max 500, per island
     int num_motifs = 0;   // 0 = default 20 independent islands / motifs
     int generations = 0;        // 0 = backend default
@@ -41,7 +41,7 @@ struct PyTrainParams {
         // Split full paths into directory + filename for the C API
         // e.g. "data/PEAKS.fa" → dir="data/", file="PEAKS.fa"
         auto split_path = [](const std::string& full, std::string& dir, std::string& file) {
-            size_t pos = full.find_last_of('/');
+            size_t pos = full.find_last_of("/\\");
             if (pos == std::string::npos) {
                 dir = "";
                 file = full;

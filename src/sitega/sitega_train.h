@@ -21,7 +21,7 @@ struct TrainParams {
     int motif_len;          /* arg 5: motif length in nucleotides */
     int size;               /* arg 6: number of LPDs */
     int olig_bg;            /* arg 7: k-mer length for background bias (default 6) */
-    int infc;               /* arg 8: 1 = use info content in fitness, 0 = disregard */
+    int infc;               /* retained for API compatibility; currently ignored */
     const char* bg_path;    /* optional: dir for bg_file (NULL = use fg_path) */
     const char* out_path;   /* arg 9: path to output files */
     int max_peak_len;       /* arg 10: maximal peak length (default 3000) */
@@ -29,7 +29,7 @@ struct TrainParams {
     unsigned long seed;     /* optional: RNG seed (0 = time(NULL)) */
     int verbose;            /* optional: 0 = summary only, 1 = per-individual detail */
     int pop_size;           /* optional: population size per island (0 = default 100, max 500) */
-    int num_motifs;         /* optional: independent islands / motifs to write (0 = default 20, capped by pop_size) */
+    int num_motifs;         /* optional: independent islands / motifs to write (0 = default 20, max 500) */
     int generations;        /* optional: GA generations (0 = backend default) */
     int mutation_attempts;  /* optional: mutations per candidate per generation (0 = backend default) */
     int stale_generations;  /* optional: early stop after stale generations (0 = backend default) */

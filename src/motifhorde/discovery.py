@@ -690,7 +690,6 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         threads: int | None = None,
         seed: int | None = None,
         pop_size: int = 30,
-        num_motifs: int = 20,
         generations: int | None = 40,
         mutation_attempts: int | None = 30,
         stale_generations: int | None = 10,
@@ -701,9 +700,8 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
         self.seed = seed
         # SiteGA tuning knobs are intentionally not exposed via CLI.
         # pop_size is the number of individuals per island.
-        # num_motifs is the default number of islands / SiteGA motifs to request.
+        # Each island produces one motif; discover() may request more than nmotifs.
         self.pop_size = pop_size
-        self.num_motifs = num_motifs
         self.generations = generations
         self.mutation_attempts = mutation_attempts
         self.stale_generations = stale_generations
@@ -731,15 +729,15 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
             max_lpd=6,
             motif_len=length,
             size=feature_count,
-            olig_bg=6,
-            infc=1,
+            olig_bg=min(6, length),
+            infc=0,
             out_path=output_dir + os.sep,
             max_peak_len=5000,
             log_file="sitega.log",
             num_threads=self.threads or 0,
             seed=seed,
             pop_size=self.pop_size,
-            num_motifs=max(self.num_motifs, number_of_motifs),
+            num_motifs=max(self.nmotifs, number_of_motifs),
             generations=self.generations or 0,
             mutation_attempts=self.mutation_attempts or 0,
             stale_generations=self.stale_generations or 0,

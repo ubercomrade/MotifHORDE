@@ -64,17 +64,17 @@ def test_sitega_discovery_uses_returned_mat_path(monkeypatch, tmp_path):
             "max_lpd": 6,
             "motif_len": 4,
             "size": 10,
-            "olig_bg": 6,
-            "infc": 1,
+            "olig_bg": 4,
+            "infc": 0,
             "out_path": os.fspath(output_dir) + os.sep,
             "max_peak_len": 5000,
             "log_file": "sitega.log",
             "num_threads": 0,
             "seed": 0,
             "pop_size": 30,
-            "num_motifs": 20,
-            "generations": 50,
-            "mutation_attempts": 50,
+            "num_motifs": 5,
+            "generations": 40,
+            "mutation_attempts": 30,
             "stale_generations": 10,
         }
     ]
@@ -174,7 +174,7 @@ def test_sitega_discovery_requests_at_least_requested_island_count(
 
     monkeypatch.setitem(sys.modules, "sitega", SimpleNamespace(train=train))
 
-    SitegaDiscoveryTool(num_motifs=2).discover(
+    SitegaDiscoveryTool(nmotifs=2).discover(
         os.fspath(foreground),
         os.fspath(background),
         os.fspath(output_dir),
@@ -323,7 +323,7 @@ def test_sitega_discovery_real_backend_smoke(tmp_path):
     motifs = SitegaDiscoveryTool(
         seed=123,
         pop_size=6,
-        num_motifs=3,
+        nmotifs=3,
         generations=1,
         mutation_attempts=1,
         stale_generations=1,
@@ -351,6 +351,59 @@ def test_sitega_discovery_real_backend_smoke(tmp_path):
     assert "Island 1/3" in log_text
     assert "Island 3 winner_fit=" in log_text
     assert "Pipeline completed successfully!" in log_text
+
+
+def test_sitega_discovery_real_backend_supports_short_motif(tmp_path):
+    pytest.importorskip("sitega")
+
+    motifs = SitegaDiscoveryTool(
+        seed=123,
+        pop_size=4,
+        nmotifs=1,
+        generations=1,
+        mutation_attempts=1,
+        stale_generations=1,
+    ).discover(
+        "tests/test_data/small_pipeline/foreground.fa",
+        "tests/test_data/small_pipeline/background.fa",
+        os.fspath(tmp_path),
+        number_of_motifs=1,
+        length=4,
+        lpd=10,
+    )
+
+    assert [(motif.name, motif.length) for motif in motifs] == [("Sitega-1", 4)]
+
+
+@pytest.mark.parametrize(
+    ("pop_size", "num_motifs"),
+    [(-1, 1), (501, 1), (4, -1), (4, 501)],
+)
+def test_sitega_backend_rejects_invalid_search_sizes(
+    tmp_path, pop_size, num_motifs
+):
+    sitega = pytest.importorskip("sitega")
+
+    rc, *_ = sitega.train(
+        fg_path="tests/test_data/small_pipeline/foreground.fa",
+        bg_path="tests/test_data/small_pipeline/background.fa",
+        max_lpd=6,
+        motif_len=8,
+        size=10,
+        olig_bg=6,
+        infc=0,
+        out_path=os.fspath(tmp_path) + os.sep,
+        max_peak_len=5000,
+        log_file="sitega.log",
+        seed=123,
+        pop_size=pop_size,
+        num_motifs=num_motifs,
+        generations=1,
+        mutation_attempts=1,
+        stale_generations=1,
+    )
+
+    assert rc != 0
 
 
 def test_sitega_discovery_falls_back_to_glob_for_empty_mat_path(monkeypatch, tmp_path):

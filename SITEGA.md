@@ -1,8 +1,9 @@
 # SiteGA Algorithm Notes
 
-This document describes the current SiteGA implementation in
-`src/sitega/andy05cell.cpp`. It is a description of the code as implemented,
-not a cleaned-up algorithm specification.
+This document describes the legacy SiteGA implementation retained in
+`src/sitega/__andy05cell_old.cpp`. The default backend is the rewritten
+`src/sitega/andy05cell_update.cpp`, whose data structures and search operators
+differ from the legacy code described below.
 
 ## Main Data Model
 
