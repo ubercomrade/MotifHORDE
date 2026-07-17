@@ -69,7 +69,7 @@ node_modules/
 # PHP
 vendor/
 
-# Python
+# Language caches
 __pycache__/
 *.py[cod]
 *$py.class
@@ -126,7 +126,8 @@ build/
 dist/
 target/
 out/
-bin/
+bin/*
+!bin/motifhorde.jl
 obj/
 plans/*
 examples/benchmark_fast_profile_score.py
@@ -169,13 +170,7 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 *.cmake
-# Important: Don't ignore the main CMakeLists.txt file
-!CMakeLists.txt
 
 ################################################################################
 # End of .gitignore
 ################################################################################
-
-# Package data bundled into wheels/sdists.
-!src/motifhorde/bin/
-!src/motifhorde/bin/**

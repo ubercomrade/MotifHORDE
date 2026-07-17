@@ -1,0 +1,31 @@
+name = "MotifHORDE"
+uuid = "5b611302-73ff-4ac1-831d-3fec011d047b"
+version = "0.1.0"
+
+[deps]
+ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+Mimosa = "2e41fa5d-e7f2-4070-8a6b-25ce77bfeb85"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+[compat]
+ArgParse = "1"
+JSON3 = "1"
+Logging = "1.11.0"
+Mimosa = "0.1"
+Printf = "1.11.0"
+Random = "1.11.0"
+Statistics = "1.11.1"
+julia = "1.12"
+
+[extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
+JuliaFormatter = "98e50ef6-434e-11e9-1051-2b60c6c9e899"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "Aqua", "JET", "JuliaFormatter"]
