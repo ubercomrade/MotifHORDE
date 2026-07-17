@@ -1,9 +1,9 @@
 module MotifHORDE
 
-using ArgParse
+using ArgParse: @add_arg_table!, ArgParseSettings, parse_args
 using JSON3
 using Logging
-using Mimosa
+using Mimosa: Mimosa
 using Printf
 using Random
 using Statistics
@@ -17,6 +17,56 @@ include("evaluation.jl")
 include("bootstrap.jl")
 include("pipeline.jl")
 include("cli.jl")
+
+function (@main)(arguments::Vector{String}=copy(ARGS))
+    parsed = parse_args(args, _cli_settings())
+    _validate_cli!(parsed)
+    criterion = parsed["comparison-criterion"]
+    parsed["comparator"] == "mimosa" ||
+        criterion == "score" ||
+        throw(ArgumentError("p-value criterion requires --comparator mimosa"))
+    criterion == "score" ||
+        parsed["mimosa-null-distribution"] !== nothing ||
+        throw(ArgumentError("p-value criterion requires --mimosa-null-distribution"))
+    configure_logging(parsed["verbose"])
+    tool = _setup_tool(parsed)
+    evaluator = PerformanceEvaluator(; background_type=Symbol(parsed["background-type"]))
+    threshold = if parsed["comparison-threshold"] === nothing
+        default_threshold_for_criterion(criterion)
+    else
+        parsed["comparison-threshold"]
+    end
+    comparator = if parsed["comparator"] == "mimosa"
+        UniversalMotifComparator(;
+            metric=Symbol(parsed["mimosa-metric"]),
+            comparison_criterion=Symbol(criterion),
+            comparison_threshold=threshold,
+            search_range=parsed["mimosa-search-range"],
+            null_distribution=parsed["mimosa-null-distribution"],
+        )
+    else
+        TomtomComparator(;
+            metric=Symbol(parsed["tomtom-metric"]),
+            comparison_criterion=Symbol(criterion),
+            comparison_threshold=threshold,
+        )
+    end
+    jobs = parsed["jobs"] == -1 ? Threads.nthreads() : parsed["jobs"]
+    config = PipelineConfig(parsed["fpr"], parsed["nmotifs"], jobs, parsed["seed"])
+    run_pipeline(
+        tool,
+        evaluator,
+        comparator,
+        parsed["foreground"],
+        parsed["background"],
+        parsed["promoters"],
+        parsed["output"],
+        _setup_params(parsed);
+        metric=parsed["metric"],
+        config=config,
+    )
+    return 0
+end
 
 export BootstrapTask,
     Comparison,

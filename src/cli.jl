@@ -33,6 +33,8 @@ function _cli_settings()
         "-t", "--tool"
         arg_type = String
         default = "streme"
+        range_tester =
+            value -> value in ("streme", "meme", "bamm", "dimont", "slim", "sitega")
         "-n", "--nmotifs"
         arg_type = Int
         default = 5
@@ -75,12 +77,15 @@ function _cli_settings()
         "--background-type"
         arg_type = String
         default = "peaks"
+        range_tester = value -> value in ("sites", "peaks")
         "-m", "--metric"
         arg_type = String
         default = "pauROC"
+        range_tester = value -> value in VALIDATION_METRICS
         "-c", "--comparator"
         arg_type = String
         default = "tomtom"
+        range_tester = value -> value in ("tomtom", "mimosa")
         "--tomtom-metric"
         arg_type = String
         default = "pcc"
@@ -90,6 +95,7 @@ function _cli_settings()
         "--comparison-criterion"
         arg_type = String
         default = "score"
+        range_tester = value -> value in ("score", "p-value")
         "--comparison-threshold"
         arg_type = Float64
         default = nothing
@@ -165,56 +171,6 @@ function _validate_cli!(args)
     all(>(0), _setup_params(args)["length"]) ||
         throw(ArgumentError("motif lengths must be positive"))
     return args
-end
-
-function main(args=ARGS)
-    parsed = parse_args(args, _cli_settings())
-    _validate_cli!(parsed)
-    criterion = parsed["comparison-criterion"]
-    parsed["comparator"] == "mimosa" ||
-        criterion == "score" ||
-        throw(ArgumentError("p-value criterion requires --comparator mimosa"))
-    criterion == "score" ||
-        parsed["mimosa-null-distribution"] !== nothing ||
-        throw(ArgumentError("p-value criterion requires --mimosa-null-distribution"))
-    configure_logging(parsed["verbose"])
-    tool = _setup_tool(parsed)
-    evaluator = PerformanceEvaluator(; background_type=Symbol(parsed["background-type"]))
-    threshold = if parsed["comparison-threshold"] === nothing
-        default_threshold_for_criterion(criterion)
-    else
-        parsed["comparison-threshold"]
-    end
-    comparator = if parsed["comparator"] == "mimosa"
-        UniversalMotifComparator(;
-            metric=Symbol(parsed["mimosa-metric"]),
-            comparison_criterion=Symbol(criterion),
-            comparison_threshold=threshold,
-            search_range=parsed["mimosa-search-range"],
-            null_distribution=parsed["mimosa-null-distribution"],
-        )
-    else
-        TomtomComparator(;
-            metric=Symbol(parsed["tomtom-metric"]),
-            comparison_criterion=Symbol(criterion),
-            comparison_threshold=threshold,
-        )
-    end
-    jobs = parsed["jobs"] == -1 ? Threads.nthreads() : parsed["jobs"]
-    config = PipelineConfig(parsed["fpr"], parsed["nmotifs"], jobs, parsed["seed"])
-    run_pipeline(
-        tool,
-        evaluator,
-        comparator,
-        parsed["foreground"],
-        parsed["background"],
-        parsed["promoters"],
-        parsed["output"],
-        _setup_params(parsed);
-        metric=parsed["metric"],
-        config=config,
-    )
-    return 0
 end
 
 function configure_logging(verbose::Bool)

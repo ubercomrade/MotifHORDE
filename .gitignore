@@ -126,8 +126,6 @@ build/
 dist/
 target/
 out/
-bin/*
-!bin/motifhorde.jl
 obj/
 plans/*
 examples/benchmark_fast_profile_score.py

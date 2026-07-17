@@ -15,8 +15,9 @@ Contract version: `1`.
 
 ## CLI Matrix
 
-All commands use four positional arguments: foreground FASTA, background FASTA,
-promoters FASTA, and output directory.
+The package application is invoked as `julia -m MotifHORDE`. All commands use
+four positional arguments: foreground FASTA, background FASTA, promoters FASTA,
+and output directory.
 
 | Option | Values/default | Validation |
 | --- | --- | --- |

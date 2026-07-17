@@ -8,9 +8,27 @@ full foreground set, and writes ranked final models.
 The runtime is `MotifHORDE.jl` plus `Mimosa.jl`. Python, pickle/joblib, C++ and
 `mimosa-tool` are not runtime dependencies.
 
-## Install
+## Installation
 
-Requirements:
+MotifHORDE requires Julia 1.12 or newer. Until `MotifHORDE.jl` is registered
+in the General registry, run the commands below from a repository checkout:
+
+If Mimosa is not already available in the project environment, install its API
+directly from the repository:
+
+```bash
+julia -e 'using Pkg; Pkg.activate("."); Pkg.instantiate()'
+julia -e 'using Pkg; Pkg.activate("."); Pkg.add(url="https://github.com/ubercomrade/Mimosa.jl.git")'
+```
+
+To make the checkout available as a regular package in the active Julia
+environment, develop it once:
+
+```bash
+julia -e 'using Pkg; Pkg.develop(path=".")'
+```
+
+External requirements:
 
 - Julia 1.12 or a later Julia 1.x release supported by the pinned environment;
 - MEME Suite for `streme` and `meme`;
@@ -18,23 +36,31 @@ Requirements:
 - Java and externally supplied Jstacs JARs for `dimont` and `slim`;
 - the independent Julia SiteGA project for `sitega`.
 
-Instantiate the package:
-
-```bash
-julia --project=. -e 'using Pkg; Pkg.instantiate()'
-```
-
 The installed `Mimosa.jl` revision is recorded in `Manifest.toml`. Its public
 API is the only model reader, scanner, site/PFM extractor, serializer and
 comparator used by this package.
 
-## Usage
+## CLI
+
+Run the package CLI through its Julia module:
 
 ```bash
-julia --project=. bin/motifhorde.jl \
+julia -m MotifHORDE \
   foreground.fa background.fa promoters.fa output/ \
   --tool streme --length 8-20-4 --nmotifs 5 --metric pauROC
 ```
+
+The same entry point is available from Julia code:
+
+```bash
+julia -e 'using MotifHORDE; MotifHORDE.main([
+    "foreground.fa", "background.fa", "promoters.fa", "output/",
+    "--tool", "streme", "--length", "8-20-4", "--nmotifs", "5",
+])'
+```
+
+Diagnostics are written to `stderr` by the Julia process; successful discovery
+results are written to the configured output directory.
 
 Supported tools are `streme`, `meme`, `bamm`, `dimont`, `slim`, and `sitega`.
 Ranges accept `start-end-step`, comma-separated values, or a single value.
@@ -85,7 +111,7 @@ hard error.
 ## Development
 
 ```bash
-julia --project=. -e 'using Pkg; Pkg.test()'
+julia -e 'using Pkg; Pkg.activate("."); Pkg.test()'
 ```
 
 The package tests use fake external processes for the SiteGA contract. Real

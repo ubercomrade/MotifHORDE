@@ -1,5 +1,6 @@
 using Test
 using Aqua
+using ArgParse
 using Mimosa
 using MotifHORDE
 
@@ -7,6 +8,27 @@ using MotifHORDE
     @test MotifHORDE.parse_range("8-20-4") == [8, 12, 16, 20]
     @test MotifHORDE.parse_range("8, 10, 12") == [8, 10, 12]
     @test_throws ArgumentError MotifHORDE.parse_range("8-20-0")
+
+    @testset "CLI parsing" begin
+        parsed = ArgParse.parse_args(
+            ["foreground.fa", "background.fa", "promoters.fa", "output"],
+            MotifHORDE._cli_settings(),
+        )
+        @test parsed["tool"] == "streme"
+        @test parsed["nmotifs"] == 5
+        @test parsed["verbose"] == false
+        @test_throws ArgParse.ArgParseError ArgParse.parse_args(
+            [
+                "foreground.fa",
+                "background.fa",
+                "promoters.fa",
+                "output",
+                "--tool",
+                "unknown",
+            ],
+            MotifHORDE._cli_settings(),
+        )
+    end
 
     @testset "FASTA and Jstacs I/O" begin
         mktempdir() do directory
