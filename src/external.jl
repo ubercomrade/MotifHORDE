@@ -3,7 +3,6 @@
 const DEFAULT_MEME_COMMAND = "meme"
 const DEFAULT_STREME_COMMAND = "streme"
 const DEFAULT_BAMM_COMMAND = "BaMMmotif"
-const DEFAULT_SITEGA_COMMAND = "sitega"
 
 function resolve_command(
     cli_value::Union{Nothing,AbstractString},

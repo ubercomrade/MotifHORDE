@@ -45,8 +45,11 @@ function _cli_settings()
         arg_type = String
         default = "1-4-1"
         "--lpd"
+        arg_type = Int
+        default = 6
+        "--features"
         arg_type = String
-        default = "10-40-10"
+        default = "10-40-5"
         "--streme-command"
         arg_type = String
         default = nothing
@@ -54,9 +57,6 @@ function _cli_settings()
         arg_type = String
         default = nothing
         "--bamm-command"
-        arg_type = String
-        default = nothing
-        "--sitega-command"
         arg_type = String
         default = nothing
         "--dimont-jar"
@@ -141,9 +141,7 @@ function _setup_tool(args)
             threads=1,
         )
     elseif args["tool"] == "sitega"
-        return SitegaDiscoveryTool(;
-            executable=args["sitega-command"], threads=1, seed=args["seed"]
-        )
+        return SitegaDiscoveryTool(; threads=1, seed=args["seed"])
     end
     return throw(ArgumentError("Unknown discovery tool: $(args["tool"])"))
 end
@@ -151,7 +149,10 @@ end
 function _setup_params(args)
     params = Dict{String,Any}("length" => parse_range(args["length"]))
     args["tool"] == "bamm" && (params["order"] = parse_range(args["order"]))
-    args["tool"] == "sitega" && (params["lpd"] = parse_range(args["lpd"]))
+    if args["tool"] == "sitega"
+        params["lpd"] = [args["lpd"]]
+        params["features"] = parse_range(args["features"])
+    end
     return params
 end
 
@@ -170,6 +171,11 @@ function _validate_cli!(args)
         throw(ArgumentError("--jobs must be -1 or a positive integer"))
     all(>(0), _setup_params(args)["length"]) ||
         throw(ArgumentError("motif lengths must be positive"))
+    if args["tool"] == "sitega"
+        1 <= args["lpd"] <= 6 || throw(ArgumentError("--lpd must be in 1:6"))
+        all(>(0), _setup_params(args)["features"]) ||
+            throw(ArgumentError("SiteGA feature counts must be positive"))
+    end
     return args
 end
 

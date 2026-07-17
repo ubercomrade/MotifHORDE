@@ -24,14 +24,16 @@ and output directory.
 | `--tool` | `streme` | one supported tool name |
 | `--length` | `8-20-4` | positive integer values |
 | `--order` | `1-4-1` | used by BaMM |
-| `--lpd` | `10-40-10` | used by SiteGA |
+| `--lpd` | `6` | maximum SiteGA LPD width, integer in `1:6` |
+| `--features` | `10-40-5` | number of LPD features in each SiteGA model |
 | `--nmotifs` | `5` | positive integer |
 | `--jobs` | `1` | positive integer |
 | `--seed` | unset | deterministic task seeds only when set |
 | `--metric` | `pauROC` | `auPRC`, `auROC`, `pauPRC`, `pauROC` |
 | `--comparison-criterion` | `score` | inclusive `>= 0.9` score or `<= 0.05` p-value by default |
 
-P-value filtering requires the Mimosa null-distribution bundle and the MIMOSA
+SiteGA discovery is provided by the `Sitega.jl` Git dependency and does not
+require a separately installed executable. P-value filtering requires the Mimosa
 comparator. Nonzero external process status, missing output, invalid model
 format, and incompatible model length are errors rather than empty success.
 

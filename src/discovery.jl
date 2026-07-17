@@ -568,46 +568,32 @@ function discover(
 end
 
 struct SitegaDiscoveryTool <: MotifDiscoveryTool
-    executable::Union{Nothing,String}
     threads::Union{Nothing,Int}
     seed::Union{Nothing,Int}
+    population::Int
+    generations::Union{Nothing,Int}
+    mutation_attempts::Int
+    stale_generations::Int
+    features::Union{Nothing,Int}
 end
-function SitegaDiscoveryTool(; executable=nothing, threads=nothing, seed=nothing)
-    return SitegaDiscoveryTool(executable, threads, seed)
-end
-
-function build_sitega_args(
-    command,
-    foreground,
-    background,
-    output_dir,
-    manifest,
-    length,
-    lpd,
-    motifs,
-    seed,
-    threads,
+function SitegaDiscoveryTool(;
+    threads=nothing,
+    seed=nothing,
+    population=100,
+    generations=nothing,
+    mutation_attempts=3,
+    stale_generations=3,
+    features=nothing,
 )
-    args = String[
-        command,
-        "--foreground",
-        foreground,
-        "--background",
-        background,
-        "--output",
-        output_dir,
-        "--manifest",
-        manifest,
-        "--length",
-        string(length),
-        "--lpd",
-        string(lpd),
-        "--motifs",
-        string(motifs),
-    ]
-    seed === nothing || append!(args, ["--seed", string(seed)])
-    threads === nothing || append!(args, ["--threads", string(threads)])
-    return args
+    return SitegaDiscoveryTool(
+        threads,
+        seed,
+        Int(population),
+        generations === nothing ? nothing : Int(generations),
+        Int(mutation_attempts),
+        Int(stale_generations),
+        features === nothing ? nothing : Int(features),
+    )
 end
 
 function _manifest_value(manifest, key::AbstractString)
@@ -655,29 +641,53 @@ function discover(
     output_dir,
     number_of_motifs;
     length=nothing,
-    lpd=20,
+    lpd=6,
+    features=tool.features,
     seed=tool.seed,
     kwargs...,
 )
     width = length === nothing ? _require_length((; kwargs...)) : Int(length)
     mkpath(output_dir)
-    command = resolve_command(
-        tool.executable, DEFAULT_SITEGA_COMMAND; env_var="HORDEMOTIFS_SITEGA_COMMAND"
-    )
     manifest = joinpath(output_dir, "sitega.manifest.json")
-    args = build_sitega_args(
-        command,
-        foreground,
-        background,
-        output_dir,
-        manifest,
-        width,
-        Int(lpd),
-        Int(number_of_motifs),
-        seed,
-        tool.threads,
+    options = Sitega.SearchOptions(;
+        motif_length=width,
+        motifs=Int(number_of_motifs),
+        max_lpd=Int(lpd),
+        seed=seed === nothing ? 0 : Int(seed),
+        threads=tool.threads === nothing ? 1 : Int(tool.threads),
+        population=tool.population,
+        generations=if tool.generations === nothing
+            max(6, min(24, 8 + width ÷ 2))
+        else
+            tool.generations
+        end,
+        mutation_attempts=tool.mutation_attempts,
+        stale_generations=tool.stale_generations,
+        features=features === nothing ? min(28, 16 * (width - 1)) : Int(features),
     )
-    run_checked(args)
-    isfile(manifest) || throw(ArgumentError("SiteGA did not create manifest: $manifest"))
+    result = Sitega.discover(foreground, background; options=options)
+    entries = Vector{Dict{String,Any}}()
+    for (index, model) in enumerate(result.models)
+        model_path = joinpath(output_dir, "sitega_model_$index.mat")
+        Sitega.write_model(model_path, model)
+        push!(
+            entries,
+            Dict(
+                "model_file" => basename(model_path),
+                "model_type" => "sitega",
+                "length" => width,
+                "name" => model.name,
+            ),
+        )
+    end
+    JSON3.write(
+        manifest,
+        Dict(
+            "schema_version" => 1,
+            "status" => "success",
+            "message" => "ok",
+            "models" => entries,
+        ),
+    )
     return _read_sitega_manifest(manifest, output_dir, Int(number_of_motifs), width)
 end

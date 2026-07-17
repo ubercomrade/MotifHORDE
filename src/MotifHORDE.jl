@@ -6,6 +6,7 @@ using Logging
 using Mimosa: Mimosa
 using Printf
 using Random
+using Sitega
 using Statistics
 
 include("models.jl")
@@ -85,7 +86,6 @@ export BootstrapTask,
     best_scores,
     build_bootstrap_tasks,
     build_dimont_args,
-    build_sitega_args,
     build_slim_args,
     build_streme_args,
     comparison_column_for_criterion,

@@ -16,6 +16,8 @@ using MotifHORDE
         )
         @test parsed["tool"] == "streme"
         @test parsed["nmotifs"] == 5
+        @test parsed["lpd"] == 6
+        @test parsed["features"] == "10-40-5"
         @test parsed["verbose"] == false
         @test_throws ArgParse.ArgParseError ArgParse.parse_args(
             [
@@ -89,38 +91,32 @@ using MotifHORDE
         @test MotifHORDE.format_params(Dict("z" => 1, "a" => 2)) == "a-2,z-1"
     end
 
-    @testset "SiteGA process contract" begin
+    @testset "SiteGA package contract" begin
         mktempdir() do directory
-            executable = joinpath(directory, "fake-sitega.jl")
-            write(
-                executable,
-                raw"""#!/usr/bin/env julia
-output = ARGS[findfirst(==("--output"), ARGS) + 1]
-manifest = ARGS[findfirst(==("--manifest"), ARGS) + 1]
-mkpath(output)
-write(joinpath(output, "model.mat"), "Fake\n1 LPD count\n4 Model length\n0 Minimum\n1 Razmah\n0 2 1.5 0 ac\n")
-using JSON3
-JSON3.write(manifest, Dict("schema_version" => 1, "status" => "success", "message" => "ok", "models" => [Dict("model_file" => "model.mat", "model_type" => "sitega", "length" => 4, "name" => "stable-name")]))
-""",
-            )
-            chmod(executable, 0o755)
             foreground = joinpath(directory, "foreground.fa")
             background = joinpath(directory, "background.fa")
-            write(foreground, ">x\nACGT\n")
-            write(background, ">x\nACGT\n")
+            write(foreground, ">x\nACGTACGTACGT\n>y\nTTTTACGTACGT\n")
+            write(background, ">x\nTTTTCCCCGGGG\n>y\nGGGGAAAACCCC\n")
             models = MotifHORDE.discover(
-                MotifHORDE.SitegaDiscoveryTool(executable=executable),
+                MotifHORDE.SitegaDiscoveryTool(
+                    seed=7,
+                    population=4,
+                    generations=1,
+                    mutation_attempts=1,
+                    stale_generations=1,
+                    features=4,
+                ),
                 foreground,
                 background,
                 joinpath(directory, "output"),
                 1;
                 length=4,
-                lpd=10,
+                lpd=3,
             )
             @test [
                 (MotifHORDE.motif_name(model), MotifHORDE.motif_length(model)) for
                 model in models
-            ] == [("stable-name", 4)]
+            ] == [("Sitega-1", 4)]
         end
     end
 end

@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "1240516021ce7e8b360b04246358c940285eb8cf"
+project_hash = "9425b6f7f5632c90c91605769a7d8afcfb092bbc"
 
 [[deps.ArgParse]]
 deps = ["Logging", "TextWrap"]
@@ -107,6 +107,14 @@ version = "1.11.0"
 [[deps.SHA]]
 uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 version = "0.7.0"
+
+[[deps.Sitega]]
+deps = ["ArgParse", "LinearAlgebra", "Printf"]
+git-tree-sha1 = "fc582d59194b6a6e3f69c51f8d482ac462ed11ea"
+repo-rev = "main"
+repo-url = "https://github.com/ubercomrade/Sitega.jl.git"
+uuid = "34ededa9-d0ef-44c4-a20a-cc4bb9922885"
+version = "0.1.0"
 
 [[deps.Statistics]]
 deps = ["LinearAlgebra"]
