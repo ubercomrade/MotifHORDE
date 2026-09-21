@@ -1,21 +1,23 @@
-"""Wrappers for external de novo motif discovery tools."""
+"""Subprocess adapters for external motif discovery tools."""
 
 from __future__ import annotations
 
 import glob
+import json
 import logging
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import List
+from dataclasses import replace
+from pathlib import Path
 
-from mimosa import GenericModel, read_model
+from mimosa import MotifModel, read_model
+from mimosa.errors import ModelFormatError
 
 from .external import (
     DEFAULT_BAMM_COMMAND,
-    DEFAULT_DIMONT_JAR,
     DEFAULT_MEME_COMMAND,
-    DEFAULT_SLIM_JAR,
+    DEFAULT_SITEGA_COMMAND,
     DEFAULT_STREME_COMMAND,
     resolve_command,
     resolve_existing_path,
@@ -29,7 +31,7 @@ _MEME_WIDTH_RE = re.compile(r"\bw=\s*(\d+)")
 
 
 class MotifDiscoveryTool(ABC):
-    """Base interface for de novo discovery wrappers."""
+    """Common interface for external discovery adapters."""
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -43,8 +45,7 @@ class MotifDiscoveryTool(ABC):
         number_of_motifs: int,
         *args,
         **kwargs,
-    ) -> List[GenericModel]:
-        """Run the discovery tool and return discovered models."""
+    ) -> list[MotifModel]:
         raise NotImplementedError
 
 
@@ -52,28 +53,27 @@ def _require_length(kwargs: dict) -> int:
     length = kwargs.get("length")
     if length is None:
         raise ValueError("Parameter 'length' is required for discovery")
-    return int(length)
+    length = int(length)
+    if length < 1:
+        raise ValueError("motif length must be positive")
+    return length
 
 
-def _has_expected_length(motif: GenericModel, expected_length: int | None) -> bool:
-    if expected_length is None or motif.length == expected_length:
-        return True
+def _check_length(model: MotifModel, expected_length: int | None) -> None:
+    if expected_length is not None and model.motif_length != expected_length:
+        raise ValueError(
+            f"{type(model).__name__} model {model.name!r} has length "
+            f"{model.motif_length}, expected {expected_length}"
+        )
 
-    logger.warning(
-        "Skipping %s motif %s with length %s; expected %s",
-        motif.type_key,
-        motif.name,
-        motif.length,
-        expected_length,
-    )
-    return False
+
+def _rename(model: MotifModel, prefix: str, index: int) -> MotifModel:
+    return replace(model, name=f"{prefix}-{index}")
 
 
 def _meme_matrix_width(header: str) -> int:
     match = _MEME_WIDTH_RE.search(header)
-    if match is None:
-        return 0
-    return int(match.group(1))
+    return 0 if match is None else int(match.group(1))
 
 
 def _is_probability_row(line: str) -> bool:
@@ -81,37 +81,33 @@ def _is_probability_row(line: str) -> bool:
     if len(parts) != 4:
         return False
     try:
-        for part in parts:
-            float(part)
+        [float(part) for part in parts]
     except ValueError:
         return False
     return True
 
 
-def _meme_full_report_name(line: str) -> str | None:
+def _meme_report_name(line: str) -> str | None:
     parts = line.strip().split()
     if len(parts) < 2 or parts[0] != "MOTIF":
         return None
-    if len(parts) >= 3 and parts[2].startswith("MEME-"):
-        return parts[2]
-    return parts[1]
+    return parts[2] if len(parts) >= 3 and parts[2].startswith("MEME-") else parts[1]
 
 
 def _meme_stdout_for_mimosa(stdout: str) -> str:
-    """Convert MEME full text reports to the compact MEME matrix format."""
+    """Keep only probability matrices from MEME's verbose text report."""
     lines = stdout.splitlines()
     motifs: list[tuple[str, str, list[str]]] = []
     current_name: str | None = None
     index = 0
-
     while index < len(lines):
         line = lines[index]
-        name = _meme_full_report_name(line)
+        name = _meme_report_name(line)
         if name is not None:
             current_name = name
         elif line.startswith("letter-probability matrix:"):
             width = _meme_matrix_width(line)
-            rows = lines[index + 1 : index + 1 + width]
+            rows = lines[index + 1 : index + width + 1]
             if (
                 current_name is not None
                 and width > 0
@@ -126,7 +122,6 @@ def _meme_stdout_for_mimosa(stdout: str) -> str:
 
     if not motifs:
         return stdout
-
     normalized = ["MEME version 4", "", "ALPHABET= ACGT", "", "strands: + -", ""]
     for name, header, rows in motifs:
         normalized.extend([f"MOTIF {name}", header, *rows, ""])
@@ -135,23 +130,31 @@ def _meme_stdout_for_mimosa(stdout: str) -> str:
 
 def _read_indexed_models(
     path: str,
-    model_type: str,
+    model_format: str,
     prefix: str,
     number_of_motifs: int,
     expected_length: int | None = None,
-) -> List[GenericModel]:
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return []
+    **kwargs,
+) -> list[MotifModel]:
+    if number_of_motifs < 1:
+        raise ValueError("number_of_motifs must be positive")
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        raise FileNotFoundError(f"Discovery output is missing or empty: {path}")
 
-    motifs: List[GenericModel] = []
+    motifs: list[MotifModel] = []
     for index in range(number_of_motifs):
         try:
-            motif = read_model(path, model_type, index=index)
+            model = read_model(path, format=model_format, index=index, **kwargs)
         except IndexError:
             break
-        motif.name = f"{prefix}-{index + 1}"
-        if _has_expected_length(motif, expected_length):
-            motifs.append(motif)
+        except ModelFormatError as exc:
+            if index > 0 and "motif index" in str(exc) and "out of range" in str(exc):
+                break
+            raise
+        _check_length(model, expected_length)
+        motifs.append(_rename(model, prefix, index + 1))
+    if not motifs:
+        raise RuntimeError(f"No models found in discovery output: {path}")
     return motifs
 
 
@@ -164,153 +167,84 @@ def _run_streme(
     command: str | None = None,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
-    tmp_meme = os.path.join(output_dir, "motifs.meme")
-    resolved_command = command or resolve_command(
-        "streme",
+    output = os.path.join(output_dir, "motifs.meme")
+    executable = resolve_command(
         DEFAULT_STREME_COMMAND,
-        "HORDEMOTIFS_STREME_COMMAND",
+        explicit=command,
+        env_var="HORDEMOTIFS_STREME_COMMAND",
     )
-    args = [
-        resolved_command,
-        "--p",
-        foreground,
-        "--n",
-        background,
-        "--objfun",
-        "de",
-        "--minw",
-        str(length),
-        "--maxw",
-        str(length),
-        "-nmotifs",
-        str(number_of_motifs),
-        "--text",
-    ]
-    result = run_checked(args)
-    with open(tmp_meme, "w") as handle:
-        handle.write(result.stdout)
-    return tmp_meme
+    result = run_checked(
+        [
+            executable,
+            "--p",
+            foreground,
+            "--n",
+            background,
+            "--objfun",
+            "de",
+            "--minw",
+            str(length),
+            "--maxw",
+            str(length),
+            "-nmotifs",
+            str(number_of_motifs),
+            "--text",
+        ]
+    )
+    if not result.stdout.strip():
+        raise RuntimeError("STREME produced no MEME output")
+    Path(output).write_text(result.stdout, encoding="utf-8")
+    return output
 
 
 def _existing_xml_paths(output_dir: str, patterns: list[str]) -> list[str]:
-    paths: list[str] = []
     for pattern in patterns:
-        paths.extend(sorted(glob.glob(os.path.join(output_dir, pattern))))
+        paths = sorted(glob.glob(os.path.join(output_dir, pattern)))
         if paths:
             return paths
-    return paths
+    raise FileNotFoundError(f"No XML model output found in {output_dir}")
 
 
 def _read_xml_models(
     paths: list[str],
-    model_type: str,
+    model_format: str,
     prefix: str,
     number_of_motifs: int,
     expected_length: int | None = None,
-) -> List[GenericModel]:
-    motifs: List[GenericModel] = []
+) -> list[MotifModel]:
+    motifs: list[MotifModel] = []
     for path in paths:
-        try:
-            motif = read_model(path, model_type)
-        except ValueError as exc:
-            logger.warning("Skipping invalid %s output %s: %s", model_type, path, exc)
-            continue
-        motif.name = f"{prefix}-{len(motifs) + 1}"
-        if not _has_expected_length(motif, expected_length):
-            continue
-        motifs.append(motif)
-        if len(motifs) >= number_of_motifs:
+        if not os.path.isfile(path) or os.path.getsize(path) == 0:
+            raise FileNotFoundError(f"Discovery output is missing or empty: {path}")
+        model = read_model(path, format=model_format)
+        _check_length(model, expected_length)
+        motifs.append(_rename(model, prefix, len(motifs) + 1))
+        if len(motifs) == number_of_motifs:
             break
+    if not motifs:
+        raise RuntimeError(f"No models found in XML discovery output: {paths}")
     return motifs
 
 
-def _normalize_sitega_mat_path(path: str) -> str:
-    if os.path.splitext(path)[1].lower() == ".mat":
-        return path
-
-    mat_path = f"{path}.mat"
-    if os.path.exists(mat_path):
-        return mat_path
-
-    os.replace(path, mat_path)
-    return mat_path
-
-
-def _sitega_mat_rank(path: str) -> int:
-    root, extension = os.path.splitext(path)
-    rank_source = root if extension.lower() == ".mat" else path
-    match = re.search(r"_mat(\d+)$", rank_source)
-    return int(match.group(1)) if match is not None else 0
-
-
-def _sitega_ranked_paths_from(path: str) -> list[str]:
-    root, extension = os.path.splitext(path)
-    rank_source = root if extension.lower() == ".mat" else path
-    match = re.search(r"^(.*_mat)\d+$", rank_source)
-    if match is None:
-        return [path] if os.path.exists(path) else []
-
-    prefix = match.group(1)
-    paths = []
-    for candidate in glob.glob(f"{glob.escape(prefix)}*"):
-        suffix = candidate[len(prefix) :]
-        if suffix.lower().endswith(".mat"):
-            suffix = suffix[:-4]
-        if suffix.isdigit():
-            paths.append(candidate)
-    return sorted(set(paths), key=lambda item: (_sitega_mat_rank(item), item))
-
-
-def _sitega_output_paths(output_dir: str, mat_path: str) -> list[str]:
-    paths = _sitega_ranked_paths_from(mat_path) if mat_path else []
-    if not paths:
-        for pattern in ["train_mat*", "train.fa_mat*", "*_mat*", "*.mat"]:
-            paths = sorted(
-                glob.glob(os.path.join(output_dir, pattern)),
-                key=lambda item: (_sitega_mat_rank(item), item),
-            )
-            if paths:
-                break
-
-    normalized = []
-    seen = set()
-    for path in paths:
-        normalized_path = _normalize_sitega_mat_path(path)
-        if normalized_path not in seen:
-            normalized.append(normalized_path)
-            seen.add(normalized_path)
-    return normalized
-
-
 class StremeDiscoveryTool(MotifDiscoveryTool):
-    """Wrapper around STREME PWM discovery."""
-
     def __init__(self, nmotifs: int = 5, command: str | None = None) -> None:
-        super().__init__(name="streme")
+        super().__init__("streme")
         self.nmotifs = nmotifs
         self.command = command
 
     def discover(
-        self,
-        foreground: str,
-        background: str,
-        output_dir: str,
-        number_of_motifs: int,
-        *args,
-        **kwargs,
-    ) -> List[GenericModel]:
+        self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
+    ):
         length = _require_length(kwargs)
-        tmp_meme = _run_streme(
+        output = _run_streme(
             foreground, background, output_dir, length, number_of_motifs, self.command
         )
         return _read_indexed_models(
-            tmp_meme, "pwm", "Streme", number_of_motifs, expected_length=length
+            output, "meme", "Streme", number_of_motifs, expected_length=length
         )
 
 
 class MemeDiscoveryTool(MotifDiscoveryTool):
-    """Wrapper around MEME PWM discovery."""
-
     def __init__(
         self,
         command: str | None = None,
@@ -321,7 +255,7 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
         seed: int | None = None,
         threads: int | None = None,
     ) -> None:
-        super().__init__(name="meme")
+        super().__init__("meme")
         self.command = command
         self.objfun = objfun
         self.model = model
@@ -331,22 +265,18 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
         self.threads = threads
 
     def discover(
-        self,
-        foreground: str,
-        background: str,
-        output_dir: str,
-        number_of_motifs: int,
-        *args,
-        **kwargs,
-    ) -> List[GenericModel]:
+        self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
+    ):
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
-        tmp_meme = os.path.join(output_dir, "motifs.meme")
-        command = self.command or resolve_command(
-            "meme", DEFAULT_MEME_COMMAND, "HORDEMOTIFS_MEME_COMMAND"
+        output = os.path.join(output_dir, "motifs.meme")
+        executable = resolve_command(
+            DEFAULT_MEME_COMMAND,
+            explicit=self.command,
+            env_var="HORDEMOTIFS_MEME_COMMAND",
         )
-        meme_args = [
-            command,
+        command = [
+            executable,
             foreground,
             "-dna",
             "-revcomp",
@@ -364,51 +294,45 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
             self.model,
         ]
         if self.objfun != "classic":
-            meme_args[4:4] = ["-neg", background]
-        optional_args = [
+            command.extend(["-neg", background])
+        for flag, value in (
             ("-minsites", self.minsites),
             ("-maxsites", self.maxsites),
             ("-seed", self.seed),
             ("-p", self.threads),
-        ]
-        for flag, value in optional_args:
+        ):
             if value is not None:
-                meme_args.extend([flag, str(value)])
+                command.extend([flag, str(value)])
 
-        result = run_checked(meme_args)
-        if result.stdout:
-            with open(tmp_meme, "w") as handle:
-                handle.write(_meme_stdout_for_mimosa(result.stdout))
-        elif os.path.exists(os.path.join(output_dir, "meme.txt")):
-            tmp_meme = os.path.join(output_dir, "meme.txt")
+        result = run_checked(command)
+        if result.stdout.strip():
+            Path(output).write_text(
+                _meme_stdout_for_mimosa(result.stdout), encoding="utf-8"
+            )
+        else:
+            report = os.path.join(output_dir, "meme.txt")
+            if not os.path.isfile(report) or os.path.getsize(report) == 0:
+                raise RuntimeError("MEME produced no model output")
+            output = report
         return _read_indexed_models(
-            tmp_meme, "pwm", "Meme", number_of_motifs, expected_length=length
+            output, "meme", "Meme", number_of_motifs, expected_length=length
         )
 
 
 class BammDiscoveryTool(MotifDiscoveryTool):
-    """Wrapper around BaMM motif discovery."""
-
     def __init__(
         self, bamm_command: str | None = None, streme_command: str | None = None
-    ) -> None:
-        super().__init__(name="bamm")
+    ):
+        super().__init__("bamm")
         self.bamm_command = bamm_command
         self.streme_command = streme_command
 
     def discover(
-        self,
-        foreground: str,
-        background: str,
-        output_dir: str,
-        number_of_motifs: int,
-        *args,
-        **kwargs,
-    ) -> List[GenericModel]:
+        self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
+    ):
         length = _require_length(kwargs)
         order = int(kwargs.get("order", 2))
-
-        tmp_meme = _run_streme(
+        pwm_output = _run_streme(
             foreground,
             background,
             output_dir,
@@ -416,43 +340,78 @@ class BammDiscoveryTool(MotifDiscoveryTool):
             number_of_motifs,
             self.streme_command,
         )
-        if not os.path.exists(tmp_meme) or os.path.getsize(tmp_meme) == 0:
-            return []
-
-        bamm_command = self.bamm_command or resolve_command(
+        executable = resolve_command(
             DEFAULT_BAMM_COMMAND,
-            DEFAULT_BAMM_COMMAND,
-            "HORDEMOTIFS_BAMM_COMMAND",
+            explicit=self.bamm_command,
+            env_var="HORDEMOTIFS_BAMM_COMMAND",
         )
-        bamm_args = [
-            bamm_command,
-            output_dir,
-            foreground,
-            "--PWMFile",
-            tmp_meme,
-            "--EM",
-            "--order",
-            str(order),
-            "--Order",
-            str(order),
-            "--basename",
-            "bamm",
-            "--negSeqFile",
-            background,
-        ]
-        run_checked(bamm_args)
+        run_checked(
+            [
+                executable,
+                output_dir,
+                foreground,
+                "--PWMFile",
+                pwm_output,
+                "--EM",
+                "--order",
+                str(order),
+                "--Order",
+                str(order),
+                "--basename",
+                "bamm",
+                "--negSeqFile",
+                background,
+            ]
+        )
 
-        motifs: List[GenericModel] = []
+        motifs = []
         for index in range(1, number_of_motifs + 1):
-            bamm_path = os.path.join(output_dir, f"bamm_motif_{index}.ihbcp")
-            if not os.path.exists(bamm_path):
-                logger.warning("Skipping missing BaMM output: %s", bamm_path)
-                continue
-            motif = read_model(bamm_path, "bamm", order=order)
-            motif.name = f"Bamm-{index}"
-            if _has_expected_length(motif, length):
-                motifs.append(motif)
+            path = os.path.join(output_dir, f"bamm_motif_{index}.ihbcp")
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                raise FileNotFoundError(f"BaMM output is missing or empty: {path}")
+            model = read_model(path, format="bamm", order=order)
+            _check_length(model, length)
+            motifs.append(_rename(model, "Bamm", index))
         return motifs
+
+
+def _build_jstacs_args(
+    java_command: str,
+    java_xmx: str,
+    jar_path: str,
+    output_dir: str,
+    data_name: str,
+    tool_name: str,
+    length: int,
+    position_tag: str,
+    value_tag: str,
+    bg_order: int,
+    motif_order: int,
+    starts: int,
+    threads: int | None,
+    extra: list[str] | None = None,
+) -> list[str]:
+    args = [
+        java_command,
+        "-Djava.awt.headless=true",
+        f"-Xmx{java_xmx}",
+        "-jar",
+        jar_path,
+        f"home={output_dir}",
+        f"data={data_name}",
+        f"infix={tool_name}",
+        f"position={position_tag}",
+        f"value={value_tag}",
+        f"motifWidth={length}",
+        f"motifOrder={motif_order}",
+        f"bgOrder={bg_order}",
+        f"starts={starts}",
+    ]
+    if extra:
+        args.extend(extra)
+    if threads is not None:
+        args.append(f"threads={threads}")
+    return args
 
 
 def _build_dimont_args(
@@ -470,26 +429,22 @@ def _build_dimont_args(
     starts: int,
     threads: int | None,
 ) -> list[str]:
-    args = [
+    return _build_jstacs_args(
         java_command,
-        "-Djava.awt.headless=true",
-        f"-Xmx{java_xmx}",
-        "-jar",
+        java_xmx,
         jar_path,
-        f"home={output_dir}",
-        f"data={data_name}",
-        "infix=dimont",
-        f"position={position_tag}",
-        f"value={value_tag}",
-        f"motifWidth={length}",
-        f"motifOrder={motif_order}",
-        f"bgOrder={bg_order}",
-        f"ess={ess}",
-        f"starts={starts}",
-    ]
-    if threads is not None:
-        args.append(f"threads={threads}")
-    return args
+        output_dir,
+        data_name,
+        "dimont",
+        length,
+        position_tag,
+        value_tag,
+        bg_order,
+        motif_order,
+        starts,
+        threads,
+        extra=[f"ess={ess}"],
+    )
 
 
 def _build_slim_args(
@@ -507,31 +462,25 @@ def _build_slim_args(
     starts: int,
     threads: int | None,
 ) -> list[str]:
-    args = [
+    return _build_jstacs_args(
         java_command,
-        "-Djava.awt.headless=true",
-        f"-Xmx{java_xmx}",
-        "-jar",
+        java_xmx,
         jar_path,
-        f"home={output_dir}",
-        f"data={data_name}",
-        "infix=slim",
-        f"position={position_tag}",
-        f"value={value_tag}",
-        f"motifWidth={length}",
-        f"motifOrder={motif_order}",
-        f"bgOrder={bg_order}",
-        f"starts={starts}",
-        f"modify={str(modify).lower()}",
-    ]
-    if threads is not None:
-        args.append(f"threads={threads}")
-    return args
+        output_dir,
+        data_name,
+        "slim",
+        length,
+        position_tag,
+        value_tag,
+        bg_order,
+        motif_order,
+        starts,
+        threads,
+        extra=[f"modify={str(modify).lower()}"],
+    )
 
 
 class DimontDiscoveryTool(MotifDiscoveryTool):
-    """Wrapper around Jstacs Dimont discovery."""
-
     def __init__(
         self,
         jar_path: str | None = None,
@@ -545,7 +494,7 @@ class DimontDiscoveryTool(MotifDiscoveryTool):
         ess: float = 4.0,
         starts: int = 20,
     ) -> None:
-        super().__init__(name="dimont")
+        super().__init__("dimont")
         self.jar_path = jar_path
         self.java_command = java_command
         self.java_xmx = java_xmx
@@ -558,23 +507,14 @@ class DimontDiscoveryTool(MotifDiscoveryTool):
         self.starts = starts
 
     def discover(
-        self,
-        foreground: str,
-        background: str,
-        output_dir: str,
-        number_of_motifs: int,
-        *args,
-        **kwargs,
-    ) -> List[GenericModel]:
+        self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
+    ):
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
         jar_path = resolve_existing_path(
-            self.jar_path,
-            "HORDEMOTIFS_DIMONT_JAR",
-            DEFAULT_DIMONT_JAR,
-            "Dimont jar",
+            self.jar_path, "HORDEMOTIFS_DIMONT_JAR", "Dimont jar"
         )
-        java_command = resolve_command(self.java_command)
+        java = resolve_command(self.java_command)
         data_name = "train.annot.fa"
         write_jstacs_fasta(
             foreground,
@@ -582,33 +522,34 @@ class DimontDiscoveryTool(MotifDiscoveryTool):
             self.position_tag,
             self.value_tag,
         )
-        cmd = _build_dimont_args(
-            java_command,
-            self.java_xmx,
-            jar_path,
-            output_dir,
-            data_name,
-            length,
-            self.position_tag,
-            self.value_tag,
-            self.bg_order,
-            self.motif_order,
-            self.ess,
-            self.starts,
-            self.threads,
-        )
-        run_checked(cmd)
-        paths = _existing_xml_paths(
-            output_dir, ["*dimont*.xml", "*Dimont*.xml", "*.xml"]
+        run_checked(
+            _build_jstacs_args(
+                java,
+                self.java_xmx,
+                jar_path,
+                output_dir,
+                data_name,
+                "dimont",
+                length,
+                self.position_tag,
+                self.value_tag,
+                self.bg_order,
+                self.motif_order,
+                self.starts,
+                self.threads,
+                extra=[f"ess={self.ess}"],
+            )
         )
         return _read_xml_models(
-            paths, "dimont", "Dimont", number_of_motifs, expected_length=length
+            _existing_xml_paths(output_dir, ["*dimont*.xml", "*Dimont*.xml", "*.xml"]),
+            "dimont",
+            "Dimont",
+            number_of_motifs,
+            expected_length=length,
         )
 
 
 class SlimDiscoveryTool(MotifDiscoveryTool):
-    """Wrapper around Jstacs SlimDimont discovery."""
-
     def __init__(
         self,
         jar_path: str | None = None,
@@ -622,7 +563,7 @@ class SlimDiscoveryTool(MotifDiscoveryTool):
         modify: bool = True,
         starts: int = 20,
     ) -> None:
-        super().__init__(name="slim")
+        super().__init__("slim")
         self.jar_path = jar_path
         self.java_command = java_command
         self.java_xmx = java_xmx
@@ -635,23 +576,14 @@ class SlimDiscoveryTool(MotifDiscoveryTool):
         self.starts = starts
 
     def discover(
-        self,
-        foreground: str,
-        background: str,
-        output_dir: str,
-        number_of_motifs: int,
-        *args,
-        **kwargs,
-    ) -> List[GenericModel]:
+        self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
+    ):
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
         jar_path = resolve_existing_path(
-            self.jar_path,
-            "HORDEMOTIFS_SLIM_JAR",
-            DEFAULT_SLIM_JAR,
-            "SlimDimont jar",
+            self.jar_path, "HORDEMOTIFS_SLIM_JAR", "SlimDimont jar"
         )
-        java_command = resolve_command(self.java_command)
+        java = resolve_command(self.java_command)
         data_name = "train.annot.fa"
         write_jstacs_fasta(
             foreground,
@@ -659,98 +591,153 @@ class SlimDiscoveryTool(MotifDiscoveryTool):
             self.position_tag,
             self.value_tag,
         )
-        cmd = _build_slim_args(
-            java_command,
-            self.java_xmx,
-            jar_path,
-            output_dir,
-            data_name,
-            length,
-            self.position_tag,
-            self.value_tag,
-            self.bg_order,
-            self.motif_order,
-            self.modify,
-            self.starts,
-            self.threads,
+        run_checked(
+            _build_slim_args(
+                java,
+                self.java_xmx,
+                jar_path,
+                output_dir,
+                data_name,
+                length,
+                self.position_tag,
+                self.value_tag,
+                self.bg_order,
+                self.motif_order,
+                self.modify,
+                self.starts,
+                self.threads,
+            )
         )
-        run_checked(cmd)
-        paths = _existing_xml_paths(output_dir, ["*slim*.xml", "*Slim*.xml", "*.xml"])
         return _read_xml_models(
-            paths, "slim", "Slim", number_of_motifs, expected_length=length
+            _existing_xml_paths(output_dir, ["*slim*.xml", "*Slim*.xml", "*.xml"]),
+            "slim",
+            "Slim",
+            number_of_motifs,
+            expected_length=length,
         )
+
+
+def _manifest_model_path(root: Path, value: object) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ValueError("SiteGA manifest model_file must be a non-empty string")
+    if os.path.isabs(value) or "\\" in value or "\x00" in value:
+        raise ValueError("SiteGA manifest model_file must be a relative POSIX path")
+    parts = value.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("SiteGA manifest model_file contains path traversal")
+    candidate = (root / Path(*parts)).resolve()
+    try:
+        if os.path.commonpath((str(root), str(candidate))) != str(root):
+            raise ValueError("SiteGA manifest model_file escapes output directory")
+    except ValueError as exc:
+        raise ValueError("SiteGA manifest model_file escapes output directory") from exc
+    for index, _ in enumerate(parts):
+        component = root.joinpath(*parts[: index + 1])
+        if component.is_symlink():
+            raise ValueError("SiteGA manifest model_file contains a symlink")
+    return candidate
+
+
+def _read_sitega_manifest(
+    manifest_path: Path, output_dir: str, expected_length: int, number_of_motifs: int
+) -> list[MotifModel]:
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"SiteGA manifest is missing: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid SiteGA manifest: {manifest_path}") from exc
+    version = manifest.get("schema_version") if isinstance(manifest, dict) else None
+    if isinstance(version, bool) or version != 1:
+        raise ValueError("SiteGA manifest schema_version must be 1")
+    if manifest.get("status") != "success":
+        raise RuntimeError(f"SiteGA failed: {manifest.get('message', '')}")
+    entries = manifest.get("models")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("SiteGA manifest models must be a non-empty list")
+
+    root = Path(output_dir).resolve()
+    models: list[MotifModel] = []
+    for entry in entries[:number_of_motifs]:
+        if not isinstance(entry, dict):
+            raise ValueError("SiteGA manifest model entry must be an object")
+        if entry.get("model_type") != "sitega":
+            raise ValueError("SiteGA manifest model_type must be 'sitega'")
+        length = entry.get("length")
+        if (
+            isinstance(length, bool)
+            or not isinstance(length, int)
+            or length != expected_length
+        ):
+            raise ValueError("SiteGA manifest model length is incompatible")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("SiteGA manifest model name must be non-empty")
+        path = _manifest_model_path(root, entry.get("model_file"))
+        if not path.is_file():
+            raise FileNotFoundError(f"SiteGA model is missing: {path}")
+        model = read_model(path, format="sitega")
+        if model.motif_length != expected_length:
+            raise ValueError(
+                f"SiteGA model {path} has length {model.motif_length}, expected {expected_length}"
+            )
+        models.append(replace(model, name=name))
+    if not models:
+        raise RuntimeError("SiteGA manifest contains no requested models")
+    return models
 
 
 class SitegaDiscoveryTool(MotifDiscoveryTool):
-    """Wrapper around SiteGA motif discovery."""
-
     def __init__(
         self,
-        nmotifs: int = 5,
+        command: str | None = None,
         threads: int | None = None,
         seed: int | None = None,
-        pop_size: int = 50,
-        num_motifs: int = 20,
-        generations: int | None = 50,
-        mutation_attempts: int | None = 50,
-        stale_generations: int | None = 10,
     ) -> None:
-        super().__init__(name="sitega")
-        self.nmotifs = nmotifs
+        super().__init__("sitega")
+        self.command = command
         self.threads = threads
         self.seed = seed
-        # SiteGA tuning knobs are intentionally not exposed via CLI.
-        self.pop_size = pop_size
-        self.num_motifs = num_motifs
-        self.generations = generations
-        self.mutation_attempts = mutation_attempts
-        self.stale_generations = stale_generations
 
     def discover(
-        self,
-        foreground: str,
-        background: str,
-        output_dir: str,
-        number_of_motifs: int,
-        *args,
-        **kwargs,
-    ) -> List[GenericModel]:
+        self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
+    ):
         length = _require_length(kwargs)
-        # SiteGA "size" = number of LPD features per motif candidate (CLI --lpd).
-        feature_count = int(kwargs.get("lpd", 20))
-        seed = int(kwargs.get("seed", self.seed or 0))
+        lpd = int(kwargs.get("lpd", 6))
+        features = int(kwargs.get("features", 20))
+        if not 1 <= lpd <= 6:
+            raise ValueError("SiteGA lpd must be between 1 and 6")
+        if features < 1:
+            raise ValueError("SiteGA features must be positive")
         os.makedirs(output_dir, exist_ok=True)
-
-        import sitega
-
-        rc, mat_path, *_ = sitega.train(
-            fg_path=foreground,
-            bg_path=background,
-            max_lpd=6,
-            motif_len=length,
-            size=feature_count,
-            olig_bg=6,
-            infc=1,
-            out_path=output_dir + os.sep,
-            max_peak_len=5000,
-            log_file="sitega.log",
-            num_threads=self.threads or 0,
-            seed=seed,
-            pop_size=self.pop_size,
-            num_motifs=max(self.num_motifs, number_of_motifs),
-            generations=self.generations or 0,
-            mutation_attempts=self.mutation_attempts or 0,
-            stale_generations=self.stale_generations or 0,
+        manifest = Path(output_dir) / "manifest.json"
+        executable = resolve_command(
+            DEFAULT_SITEGA_COMMAND,
+            explicit=self.command,
+            env_var="HORDEMOTIFS_SITEGA_COMMAND",
         )
-        if rc != 0:
-            raise RuntimeError(f"SiteGA training failed with return code {rc}")
-
-        paths = _sitega_output_paths(output_dir, mat_path)
-
-        motifs: List[GenericModel] = []
-        for index, path in enumerate(paths[:number_of_motifs], start=1):
-            motif = read_model(path, "sitega")
-            motif.name = f"Sitega-{index}"
-            if _has_expected_length(motif, length):
-                motifs.append(motif)
-        return motifs
+        command = [
+            executable,
+            "--foreground",
+            foreground,
+            "--background",
+            background,
+            "--output-dir",
+            output_dir,
+            "--length",
+            str(length),
+            "--lpd",
+            str(lpd),
+            "--features",
+            str(features),
+            "--number-of-motifs",
+            str(number_of_motifs),
+            "--manifest",
+            os.fspath(manifest),
+        ]
+        if self.threads is not None:
+            command.extend(["--threads", str(self.threads)])
+        if kwargs.get("seed", self.seed) is not None:
+            command.extend(["--seed", str(kwargs.get("seed", self.seed))])
+        run_checked(command)
+        return _read_sitega_manifest(manifest, output_dir, length, number_of_motifs)

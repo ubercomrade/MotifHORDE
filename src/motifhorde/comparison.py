@@ -1,192 +1,148 @@
-"""Pipeline-facing comparison wrappers backed by MIMOSA."""
+"""Mimosa profile comparison and stable list-based selection helpers."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
-import pandas as pd
-from mimosa.api import compare_one_to_many as mimosa_compare_one_to_many
-from mimosa.comparison import (
-    SUPPORTED_MOTIF_METRICS,
-    SUPPORTED_PROFILE_METRICS,
-    compare,
-    compare_one_to_many as low_level_compare_one_to_many,
-    create_comparator_config,
+from mimosa import (
+    MotifModel,
+    NullDistribution,
+    annotate_results,
+    compare_many,
 )
-from mimosa.types import ComparatorConfig, ComparisonResult
+from mimosa.io import read_null_bundle
 
+SUPPORTED_METRICS = ("co", "dice", "cosine")
 DEFAULT_SCORE_COMPARISON_THRESHOLD = 0.9
 DEFAULT_PVALUE_COMPARISON_THRESHOLD = 0.05
-MISSING_ADJUSTED_PVALUE_MESSAGE = (
-    "Comparison results do not contain adjusted p-values. Provide a compatible "
-    "MIMOSA null distribution with --mimosa-null-distribution."
-)
 
 
-def comparison_column_for_criterion(criterion: str) -> str:
+@dataclass(frozen=True, slots=True)
+class MatchedPair:
+    """A Mimosa comparison result retaining the source records."""
+
+    query: Any
+    target: Any
+    result: Any
+
+
+def load_null_distribution(path: str | Path) -> NullDistribution:
+    bundle = Path(path)
+    if not bundle.is_dir():
+        raise ValueError(f"Mimosa null distribution must be a directory bundle: {path}")
+    return read_null_bundle(bundle)
+
+
+def _model(record: Any) -> MotifModel:
+    model = getattr(record, "model", record)
+    if not isinstance(model, MotifModel):
+        raise TypeError(f"comparison input is not a MotifModel: {type(model).__name__}")
+    return model
+
+
+def _identity(record: Any, model: MotifModel) -> str:
+    return str(getattr(record, "id", model.name))
+
+
+def _named(model: MotifModel, name: str) -> MotifModel:
+    return replace(model, name=name)
+
+
+def compare_records(
+    query: Any,
+    targets: Iterable[Any],
+    sequences,
+    *,
+    metric: str,
+    jobs: int,
+    null_distribution: NullDistribution | None = None,
+    search_range: int = 10,
+) -> list[MatchedPair]:
+    """Compare one query against targets in stable target order."""
+    if metric not in SUPPORTED_METRICS:
+        raise ValueError(f"unsupported Mimosa metric: {metric}")
+    if jobs < 1:
+        raise ValueError("comparison jobs must be positive")
+    target_records = list(targets)
+    query_model = _model(query)
+    query_for_mimosa = _named(query_model, _identity(query, query_model))
+    target_models = [
+        _named(target_model, _identity(record, target_model))
+        for record in target_records
+        for target_model in [_model(record)]
+    ]
+    results = compare_many(
+        query_for_mimosa,
+        target_models,
+        sequences,
+        metric=metric,
+        search_range=search_range,
+        total_threads=jobs,
+        inner_threads=1,
+    )
+    if null_distribution is not None:
+        results = annotate_results(results, null_distribution)
+    return [
+        MatchedPair(query, target, result)
+        for target, result in zip(target_records, results, strict=True)
+    ]
+
+
+def comparison_value(pair: MatchedPair, criterion: str) -> float:
     if criterion == "score":
-        return "score"
+        return float(pair.result.score)
     if criterion == "p-value":
-        return "adj.p-value"
-    raise ValueError(f"Unsupported comparison criterion: {criterion}")
+        value = getattr(pair.result, "adj_p_value", None)
+        if value is None:
+            raise ValueError(
+                "Mimosa p-value comparison requires a compatible null distribution bundle"
+            )
+        return float(value)
+    raise ValueError(f"unsupported comparison criterion: {criterion}")
 
 
-def default_threshold_for_criterion(criterion: str) -> float:
+def default_threshold(criterion: str) -> float:
     if criterion == "score":
         return DEFAULT_SCORE_COMPARISON_THRESHOLD
     if criterion == "p-value":
         return DEFAULT_PVALUE_COMPARISON_THRESHOLD
-    raise ValueError(f"Unsupported comparison criterion: {criterion}")
+    raise ValueError(f"unsupported comparison criterion: {criterion}")
 
 
-class GeneralMotifComparator:
-    """Small pipeline-facing comparator interface."""
-
-    def __init__(
-        self,
-        name: str,
-        comparison_criterion: str = "score",
-        comparison_threshold: float | None = None,
-    ) -> None:
-        self.name = name
-        self.comparison_criterion = comparison_criterion
-        self.comparison_threshold = (
-            default_threshold_for_criterion(comparison_criterion)
-            if comparison_threshold is None
-            else comparison_threshold
-        )
-        self.comparison_column = comparison_column_for_criterion(comparison_criterion)
-
-    def compare(self, motifs_1, motifs_2, sequences=None) -> pd.DataFrame:
-        raise NotImplementedError
+def is_similar(pair: MatchedPair, criterion: str, threshold: float) -> bool:
+    value = comparison_value(pair, criterion)
+    return value >= threshold if criterion == "score" else value <= threshold
 
 
-class TomtomComparator(GeneralMotifComparator):
-    """Matrix comparator compatible with the pipeline naming."""
-
-    def __init__(
-        self,
-        metric: str = "pcc",
-        pfm_mode: bool = False,
-        n_jobs: int | None = 1,
-        seed: int | None = None,
-        comparison_criterion: str = "score",
-        comparison_threshold: float | None = None,
-        *,
-        pvalue: bool = False,
-        null_distribution: str | Path | dict[str, Any] | None = None,
-        null_search_dirs: Iterable[str | Path] | None = None,
-        effective_number_of_targets: int | None = None,
-    ) -> None:
-        super().__init__(
-            name=f"TomtomComparator_{metric.upper()}",
-            comparison_criterion=comparison_criterion,
-            comparison_threshold=comparison_threshold,
-        )
-        self.config = create_comparator_config(
-            metric=metric,
-            pfm_mode=pfm_mode,
-            n_jobs=n_jobs,
-            seed=seed,
-            pvalue=pvalue,
-            null_distribution=null_distribution,
-            null_search_dirs=null_search_dirs,
-            effective_number_of_targets=effective_number_of_targets,
-        )
-
-    def compare(self, motifs_1, motifs_2, sequences=None) -> pd.DataFrame:
-        records = []
-        for motif in motifs_1:
-            records.extend(
-                low_level_compare_one_to_many(
-                    motif, motifs_2, "motif", self.config, sequences=sequences
-                )
-            )
-        return _records_to_frame(records)
+def filter_similar(
+    pairs: Iterable[MatchedPair], criterion: str, threshold: float
+) -> list[MatchedPair]:
+    return [pair for pair in pairs if is_similar(pair, criterion, threshold)]
 
 
-class UniversalMotifComparator(GeneralMotifComparator):
-    """Profile comparator wrapper for the de novo pipeline."""
-
-    def __init__(
-        self,
-        name: str = "UnifiedComparator",
-        metric: str = "co",
-        n_jobs: int | None = -1,
-        seed: int | None = None,
-        comparison_criterion: str = "score",
-        comparison_threshold: float | None = None,
-        search_range: int = 10,
-        min_logfpr: float | None = None,
-        window_radius: int = 10,
-        realign_window: int = 3,
-        cache_mode: str = "off",
-        cache_dir: str = ".mimosa-cache",
-        *,
-        pvalue: bool = False,
-        null_distribution: str | Path | dict[str, Any] | None = None,
-        null_search_dirs: Iterable[str | Path] | None = None,
-        effective_number_of_targets: int | None = None,
-    ) -> None:
-        super().__init__(
-            name,
-            comparison_criterion=comparison_criterion,
-            comparison_threshold=comparison_threshold,
-        )
-        self.config = create_comparator_config(
-            metric=metric,
-            n_jobs=n_jobs,
-            seed=seed,
-            search_range=search_range,
-            min_logfpr=min_logfpr,
-            window_radius=window_radius,
-            realign_window=realign_window,
-            cache_mode=cache_mode,
-            cache_dir=cache_dir,
-            pvalue=pvalue,
-            null_distribution=null_distribution,
-            null_search_dirs=null_search_dirs,
-            effective_number_of_targets=effective_number_of_targets,
-        )
-
-    def compare(self, motifs_1, motifs_2, sequences=None) -> pd.DataFrame:
-        records = []
-        for motif in motifs_1:
-            records.extend(
-                mimosa_compare_one_to_many(
-                    query=motif,
-                    targets=list(motifs_2),
-                    strategy="profile",
-                    sequences=sequences,
-                    comparator=self.config,
-                )
-            )
-        return _records_to_frame(records)
+def sort_pairs(pairs: Iterable[MatchedPair], criterion: str) -> list[MatchedPair]:
+    return sorted(
+        pairs,
+        key=lambda pair: comparison_value(pair, criterion),
+        reverse=criterion == "score",
+    )
 
 
-def _records_to_frame(records):
-    return pd.DataFrame.from_records(records)
-
-
-compare_one_to_many = low_level_compare_one_to_many
-
-
-__all__ = [
-    "ComparatorConfig",
-    "ComparisonResult",
-    "DEFAULT_PVALUE_COMPARISON_THRESHOLD",
-    "DEFAULT_SCORE_COMPARISON_THRESHOLD",
-    "GeneralMotifComparator",
-    "MISSING_ADJUSTED_PVALUE_MESSAGE",
-    "SUPPORTED_MOTIF_METRICS",
-    "SUPPORTED_PROFILE_METRICS",
-    "TomtomComparator",
-    "UniversalMotifComparator",
-    "compare",
-    "compare_one_to_many",
-    "comparison_column_for_criterion",
-    "create_comparator_config",
-    "default_threshold_for_criterion",
-    "mimosa_compare_one_to_many",
-]
+def deduplicate_pairs(pairs: Iterable[MatchedPair]) -> list[MatchedPair]:
+    """Keep one stable query/target matching from already sorted pairs."""
+    result = []
+    queries: set[str] = set()
+    targets: set[str] = set()
+    for pair in pairs:
+        query_model = _model(pair.query)
+        target_model = _model(pair.target)
+        query_id = _identity(pair.query, query_model)
+        target_id = _identity(pair.target, target_model)
+        if query_id in queries or target_id in targets:
+            continue
+        queries.add(query_id)
+        targets.add(target_id)
+        result.append(pair)
+    return result

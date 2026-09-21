@@ -1,53 +1,91 @@
-"""De novo motif discovery pipeline."""
+"""Bootstrap, comparison, selection, and portable output orchestration."""
 
 from __future__ import annotations
 
 import itertools
 import json
 import os
-import tempfile
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
 
-import joblib
-import pandas as pd
-from mimosa import GenericModel, get_pfm
-from mimosa.batches import SequenceBatch
-from mimosa.functions import format_params
+import numpy as np
+from mimosa import (
+    BestPerSequence,
+    EncodedSequences,
+    MotifModel,
+    TopFractionHits,
+    read_fasta,
+    reconstruct_pfm,
+    write_model,
+)
 
 from .comparison import (
-    MISSING_ADJUSTED_PVALUE_MESSAGE,
-    TomtomComparator,
-    UniversalMotifComparator,
-    comparison_column_for_criterion,
-    default_threshold_for_criterion,
+    MatchedPair,
+    compare_records,
+    deduplicate_pairs,
+    default_threshold,
+    filter_similar,
+    is_similar,
+    load_null_distribution,
+    sort_pairs,
 )
 from .discovery import MotifDiscoveryTool
-from .evaluation import Bootstrapper, PerformanceEvaluator
-from .io import read_fasta, write_meme
-
-VALIDATION_METRICS = ("auPRC", "auROC", "pauPRC", "pauROC")
+from .evaluation import (
+    EvaluatedMotif,
+    Bootstrapper,
+    PerformanceEvaluator,
+    VALIDATION_METRICS,
+)
+from .io import write_meme
 
 
 class DeNovoPipeline:
-    """Orchestrate bootstrap validation, motif comparison, and final discovery."""
+    """Run the MotifHORDE parameter-selection workflow."""
 
     def __init__(
         self,
         discovery_tool: MotifDiscoveryTool,
         evaluator: PerformanceEvaluator,
-        comparator: UniversalMotifComparator,
+        mimosa_metric: str = "co",
+        comparison_criterion: str = "score",
+        comparison_threshold: float | None = None,
+        null_distribution=None,
         fpr_threshold: float = 0.001,
         number_of_motifs: int = 5,
         jobs: int = 1,
         seed: int | None = None,
+        mimosa_search_range: int = 10,
     ) -> None:
+        if comparison_criterion not in {"score", "p-value"}:
+            raise ValueError("comparison criterion must be 'score' or 'p-value'")
+        if jobs < 1:
+            raise ValueError("jobs must be positive")
+        if not np.isfinite(fpr_threshold) or not 0 <= fpr_threshold <= 1:
+            raise ValueError("fpr_threshold must be finite and lie in [0, 1]")
+        if comparison_threshold is not None and not np.isfinite(comparison_threshold):
+            raise ValueError("comparison threshold must be finite")
         self.discovery_tool = discovery_tool
         self.evaluator = evaluator
-        self.comparator = comparator
+        self.mimosa_metric = mimosa_metric
+        self.comparison_criterion = comparison_criterion
+        self.comparison_threshold = (
+            default_threshold(comparison_criterion)
+            if comparison_threshold is None
+            else float(comparison_threshold)
+        )
+        self.null_distribution = (
+            load_null_distribution(null_distribution)
+            if isinstance(null_distribution, (str, os.PathLike))
+            else null_distribution
+        )
+        if comparison_criterion == "p-value" and self.null_distribution is None:
+            raise ValueError("p-value comparison requires a Mimosa null bundle")
         self.fpr_threshold = fpr_threshold
         self.number_of_motifs = number_of_motifs
         self.jobs = jobs
         self.seed = seed
+        self.mimosa_search_range = mimosa_search_range
 
     def run(
         self,
@@ -55,529 +93,434 @@ class DeNovoPipeline:
         background_path: str,
         promoters_path: str,
         output_dir: str,
-        discovery_params: Dict[str, Iterable[Any]],
+        discovery_params: dict[str, Iterable[Any]],
         metric: str,
     ) -> None:
-        bootstrap_dir, motifs_dir = self._prepare_output_dirs(output_dir)
-        peaks, background, promoters = self._read_sequences(
-            foreground_path, background_path, promoters_path
-        )
+        if metric not in VALIDATION_METRICS:
+            raise ValueError(f"unsupported validation metric: {metric}")
+        paths = self._prepare_output_dirs(output_dir)
+        peaks, peak_names = self._read_sequences(foreground_path)
+        background, background_names = self._read_sequences(background_path)
+        promoters, _ = self._read_sequences(promoters_path)
 
-        statistics, bootstrap_motifs = self._run_bootstrap(
-            peaks, background, discovery_params, output_dir
-        )
-        self._save_bootstrap(bootstrap_motifs, statistics, bootstrap_dir)
-
-        bootstrap_records = self._compare_bootstrap_motifs(
-            bootstrap_motifs, discovery_params, peaks, statistics, metric
-        )
-        if bootstrap_records is None:
-            print("No motif comparisons were made; exiting.")
-            return
-
-        final_motifs, final_info, final_stats = self._select_final_motifs(
-            bootstrap_records=bootstrap_records,
-            bootstrap_motifs=bootstrap_motifs,
-            peaks=peaks,
-            promoters=promoters,
-            metric=metric,
-            foreground_path=foreground_path,
-            background_path=background_path,
-            output_dir=output_dir,
-            discovery_params=discovery_params,
-        )
-        final_motifs, final_info, final_stats = _deduplicate_final_motifs(
-            final_motifs,
-            final_info,
-            final_stats,
-            metric,
-            self.comparator,
-            peaks,
-        )
-        self._save_results(
-            final_motifs, final_info, final_stats, motifs_dir, metric, promoters
-        )
-
-    def _prepare_output_dirs(self, output_dir: str) -> Tuple[str, str]:
-        os.makedirs(output_dir, exist_ok=True)
-        bootstrap_dir = os.path.join(output_dir, self.discovery_tool.name, "bootstrap")
-        motifs_dir = os.path.join(output_dir, self.discovery_tool.name, "motifs")
-        os.makedirs(bootstrap_dir, exist_ok=True)
-        os.makedirs(motifs_dir, exist_ok=True)
-        return bootstrap_dir, motifs_dir
-
-    def _read_sequences(
-        self,
-        foreground_path: str,
-        background_path: str,
-        promoters_path: str,
-    ) -> Tuple[SequenceBatch, SequenceBatch, SequenceBatch]:
-        for label, path in {
-            "Foreground": foreground_path,
-            "Background": background_path,
-            "Promoters": promoters_path,
-        }.items():
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"{label} file not found: {path}")
-
-        peaks = read_fasta(foreground_path)
-        background = read_fasta(background_path)
-        promoters = read_fasta(promoters_path)
-
-        for label, batch, path in (
-            ("foreground", peaks, foreground_path),
-            ("background", background, background_path),
-            ("promoters", promoters, promoters_path),
-        ):
-            if len(batch["lengths"]) == 0:
-                raise ValueError(f"No sequences found in {label} file: {path}")
-
-        return peaks, background, promoters
-
-    def _run_bootstrap(
-        self,
-        peaks: SequenceBatch,
-        background: SequenceBatch,
-        discovery_params: Dict[str, Iterable[Any]],
-        output_dir: str,
-    ):
-        bootstrapper = Bootstrapper(
+        records = Bootstrapper(
             self.discovery_tool,
             self.evaluator,
             output_dir,
             jobs=self.jobs,
             seed=self.seed,
-        )
-        return bootstrapper.run(
+        ).run(
             peaks,
             background,
             self.number_of_motifs,
             self.fpr_threshold,
             discovery_params,
+            peak_names,
+            background_names,
         )
+        self._save_bootstrap(records, paths["bootstrap"])
+        match_groups = self._compare_bootstrap_motifs(
+            records, discovery_params, peaks, metric
+        )
+        final_records = self._select_final_motifs(
+            match_groups,
+            peaks,
+            promoters,
+            foreground_path,
+            background_path,
+            output_dir,
+            metric,
+        )
+        final_records = _deduplicate_final_motifs(
+            final_records,
+            metric,
+            peaks,
+            self.mimosa_metric,
+            self.jobs,
+            self.comparison_criterion,
+            self.comparison_threshold,
+            self.null_distribution,
+            self.mimosa_search_range,
+        )
+        self._save_results(final_records, paths["motifs"], promoters, metric)
 
-    def _save_bootstrap(
-        self, motifs: List[GenericModel], statistics: Dict[str, Any], bootstrap_dir: str
-    ) -> None:
-        models_dir = os.path.join(bootstrap_dir, "models")
-        os.makedirs(models_dir, exist_ok=True)
-        print(f"Saving {len(motifs)} bootstrap motifs to {models_dir}...")
-        for index, motif in enumerate(motifs):
-            joblib.dump(
-                motif,
-                os.path.join(models_dir, f"{index:04d}_{_safe_name(motif.name)}.pkl"),
+    def _prepare_output_dirs(self, output_dir: str) -> dict[str, Path]:
+        root = Path(output_dir) / self.discovery_tool.name
+        result = {
+            "root": root,
+            "bootstrap": root / "bootstrap",
+            "motifs": root / "motifs",
+        }
+        conflicts = [
+            result["bootstrap"] / "statistics.json",
+            result["motifs"] / "statistics.json",
+            result["motifs"] / "models" / "all_motifs_in_pfm_form.meme",
+        ]
+        for model_dir in (result["bootstrap"] / "models", result["motifs"] / "models"):
+            if model_dir.exists() and any(model_dir.iterdir()):
+                conflicts.append(model_dir)
+        task_dir = result["bootstrap"] / "tasks"
+        if task_dir.exists() and any(task_dir.iterdir()):
+            conflicts.append(task_dir)
+        existing = next((path for path in conflicts if path.exists()), None)
+        if existing is not None:
+            raise FileExistsError(f"MotifHORDE output already exists: {existing}")
+        for path in result.values():
+            path.mkdir(parents=True, exist_ok=True)
+        return result
+
+    @staticmethod
+    def _read_sequences(path: str) -> tuple[EncodedSequences, tuple[str, ...]]:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"FASTA file not found: {path}")
+        return read_fasta(path)
+
+    def _save_bootstrap(self, records: list[EvaluatedMotif], result_dir: Path) -> None:
+        models_dir = result_dir / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        entries = []
+        paths = []
+        for record in records:
+            relative = Path("models") / _safe_name(record.id)
+            target = result_dir / relative
+            _check_new_path(target)
+            paths.append(target)
+            entries.append(
+                {
+                    "id": record.id,
+                    "model": relative.as_posix(),
+                    "name": record.model.name,
+                    "split": record.split,
+                    "params": dict(record.params),
+                    "metrics": dict(record.metrics),
+                }
             )
-        self._save_json(statistics, os.path.join(bootstrap_dir, "statistics.json"))
+        for target, record in zip(paths, records, strict=True):
+            write_model(target, record.model)
+        _write_statistics(
+            result_dir / "statistics.json", self.discovery_tool.name, entries
+        )
 
     def _compare_bootstrap_motifs(
         self,
-        bootstrap_motifs: List[GenericModel],
-        discovery_params: Dict[str, Iterable[Any]],
-        peaks: SequenceBatch,
-        statistics: Dict[str, Any],
+        records: list[EvaluatedMotif],
+        discovery_params: dict[str, Iterable[Any]],
+        peaks: EncodedSequences,
         metric: str,
-    ) -> Optional[pd.DataFrame]:
-        records = []
-
-        for current_params in _iter_param_grid(discovery_params):
-            odd_motifs, even_motifs = _bootstrap_motifs_for_params(
-                bootstrap_motifs, current_params
-            )
-            if not odd_motifs or not even_motifs:
+    ) -> list[dict[str, Any]]:
+        groups: list[dict[str, Any]] = []
+        for params in _iter_param_grid(discovery_params):
+            odd = [
+                record
+                for record in records
+                if record.split == "odd" and dict(record.params) == params
+            ]
+            even = [
+                record
+                for record in records
+                if record.split == "even" and dict(record.params) == params
+            ]
+            if not odd or not even:
                 continue
-
-            odd_selected = _select_nonredundant_motifs(
-                odd_motifs, statistics, metric, self.comparator, peaks
+            odd = _select_nonredundant_motifs(
+                odd,
+                metric,
+                peaks,
+                self.mimosa_metric,
+                self.jobs,
+                self.comparison_criterion,
+                self.comparison_threshold,
+                self.null_distribution,
+                self.mimosa_search_range,
             )
-            even_selected = _select_nonredundant_motifs(
-                even_motifs, statistics, metric, self.comparator, peaks
+            even = _select_nonredundant_motifs(
+                even,
+                metric,
+                peaks,
+                self.mimosa_metric,
+                self.jobs,
+                self.comparison_criterion,
+                self.comparison_threshold,
+                self.null_distribution,
+                self.mimosa_search_range,
             )
-            if not odd_selected or not even_selected:
-                continue
-
-            frame = self.comparator.compare(
-                odd_selected, even_selected, sequences=peaks
+            pairs: list[MatchedPair] = []
+            for query in odd:
+                pairs.extend(
+                    compare_records(
+                        query,
+                        even,
+                        peaks,
+                        metric=self.mimosa_metric,
+                        jobs=self.jobs,
+                        null_distribution=self.null_distribution,
+                        search_range=self.mimosa_search_range,
+                    )
+                )
+            pairs = deduplicate_pairs(
+                sort_pairs(
+                    filter_similar(
+                        pairs,
+                        self.comparison_criterion,
+                        self.comparison_threshold,
+                    ),
+                    self.comparison_criterion,
+                )
             )
-            frame = _filter_similar_matches(frame, self.comparator)
-            if frame.empty:
-                continue
-            frame = _deduplicate_matches(_sort_comparisons(frame, self.comparator))
-            for key, value in current_params.items():
-                frame[key] = value
-            frame = _attach_average_metrics(frame, statistics)
-            records.append(frame)
-
-        if not records:
-            return None
-
-        return pd.concat(records, ignore_index=True).reset_index(drop=True)
+            if pairs:
+                groups.append({"params": params, "pairs": pairs})
+        return groups
 
     def _select_final_motifs(
         self,
-        bootstrap_records: pd.DataFrame,
-        bootstrap_motifs: List[GenericModel],
-        peaks: SequenceBatch,
-        promoters: SequenceBatch,
-        metric: str,
+        match_groups: list[dict[str, Any]],
+        peaks: EncodedSequences,
+        promoters: EncodedSequences,
         foreground_path: str,
         background_path: str,
         output_dir: str,
-        discovery_params: Dict[str, Iterable[Any]],
-    ):
-        final_motifs: List[GenericModel] = []
-        final_info: List[Tuple[str, Dict[str, Any]]] = []
-        final_stats: Dict[str, Dict[str, float]] = {}
-        param_keys = sorted(discovery_params.keys())
-
-        for group_key, group in bootstrap_records.groupby(param_keys):
-            if not isinstance(group_key, tuple):
-                group_key = (group_key,)
-            current_params = dict(zip(param_keys, group_key))
-            param_suffix = format_params(current_params)
-
-            if metric not in group.columns:
-                raise ValueError(f"Comparison must contain {metric}")
-            group = group.sort_values(metric, ascending=False)
-
-            with tempfile.TemporaryDirectory(
-                dir=os.path.join(output_dir, self.discovery_tool.name)
-            ) as tmp_dir:
+        metric: str,
+    ) -> list[dict[str, Any]]:
+        final: list[dict[str, Any]] = []
+        for group in match_groups:
+            params = dict(group["params"])
+            with _temporary_discovery_dir(
+                output_dir, self.discovery_tool.name
+            ) as work_dir:
                 full_motifs = self.discovery_tool.discover(
                     foreground_path,
                     background_path,
-                    tmp_dir,
+                    work_dir,
                     number_of_motifs=self.number_of_motifs * 2,
-                    **current_params,
+                    **params,
                 )
-
-                assigned = set()
-                for _, record in group.iterrows():
-                    remaining = [
-                        motif for motif in full_motifs if motif.name not in assigned
-                    ]
-                    if not remaining:
-                        break
-
-                    best = self._select_best_full_motif(
-                        remaining,
-                        record["query"],
-                        record["target"],
-                        bootstrap_motifs,
-                        peaks,
-                    )
-                    if best is None:
-                        print(
-                            f"Params {current_params}: No match found for motifs {record['query']}, {record['target']}"
-                        )
+            assigned: set[int] = set()
+            pairs = sorted(
+                group["pairs"],
+                key=lambda pair: _average_metric(pair, metric),
+                reverse=True,
+            )
+            for pair in pairs:
+                candidates = []
+                for index, model in enumerate(full_motifs):
+                    if index in assigned:
                         continue
-
-                    print(
-                        f"Params {current_params}: Best match for {record['query']} and {record['target']} is {best.name}"
-                    )
-                    assigned.add(best.name)
-                    _ensure_pfm(best, promoters)
-                    final_motifs.append(best)
-                    final_info.append((best.name, current_params))
-                    final_stats[f"{best.name}_{param_suffix}"] = {
-                        name: record[name]
-                        for name in ["auPRC", "auROC", "pauPRC", "pauROC"]
+                    odd = compare_records(
+                        model,
+                        [pair.query],
+                        peaks,
+                        metric=self.mimosa_metric,
+                        jobs=self.jobs,
+                        null_distribution=self.null_distribution,
+                        search_range=self.mimosa_search_range,
+                    )[0]
+                    even = compare_records(
+                        model,
+                        [pair.target],
+                        peaks,
+                        metric=self.mimosa_metric,
+                        jobs=self.jobs,
+                        null_distribution=self.null_distribution,
+                        search_range=self.mimosa_search_range,
+                    )[0]
+                    if is_similar(
+                        odd, self.comparison_criterion, self.comparison_threshold
+                    ) and is_similar(
+                        even, self.comparison_criterion, self.comparison_threshold
+                    ):
+                        candidates.append(
+                            (
+                                _candidate_value(odd, even, self.comparison_criterion),
+                                index,
+                                model,
+                            )
+                        )
+                if not candidates:
+                    continue
+                best = (
+                    min(candidates, key=lambda item: item[0])
+                    if self.comparison_criterion == "p-value"
+                    else max(candidates, key=lambda item: item[0])
+                )
+                assigned.add(best[1])
+                final.append(
+                    {
+                        "model": best[2],
+                        "name": best[2].name,
+                        "params": params,
+                        "metrics": _average_metrics(pair),
                     }
-
-        return final_motifs, final_info, final_stats
-
-    def _select_best_full_motif(
-        self,
-        full_motifs: List[GenericModel],
-        odd_name: str,
-        even_name: str,
-        bootstrap_motifs: List[GenericModel],
-        peaks: SequenceBatch,
-    ) -> Optional[GenericModel]:
-        odd_ref = [motif for motif in bootstrap_motifs if motif.name == odd_name]
-        even_ref = [motif for motif in bootstrap_motifs if motif.name == even_name]
-        if not odd_ref or not even_ref:
-            return None
-
-        sequences = None if isinstance(self.comparator, TomtomComparator) else peaks
-        comparison_odd = self.comparator.compare(
-            full_motifs, odd_ref, sequences=sequences
-        )
-        comparison_even = self.comparator.compare(
-            full_motifs, even_ref, sequences=sequences
-        )
-
-        compare_metric = _comparison_column(comparison_odd, self.comparator)
-        _comparison_column(comparison_even, self.comparator)
-
-        candidates = []
-        for motif in full_motifs:
-            odd_values = comparison_odd.loc[
-                comparison_odd["query"] == motif.name, compare_metric
-            ].values
-            even_values = comparison_even.loc[
-                comparison_even["query"] == motif.name, compare_metric
-            ].values
-            if not len(odd_values) or not len(even_values):
-                continue
-            odd_value = float(odd_values[0])
-            even_value = float(even_values[0])
-            if not _is_similar_value(self.comparator, odd_value):
-                continue
-            if not _is_similar_value(self.comparator, even_value):
-                continue
-            candidates.append((motif, (odd_value + even_value) / 2.0))
-
-        if not candidates:
-            return None
-        return sorted(
-            candidates,
-            key=lambda item: item[1],
-            reverse=not _comparison_sort_ascending(self.comparator),
-        )[0][0]
+                )
+        return final
 
     def _save_results(
         self,
-        final_motifs: List[GenericModel],
-        final_info: List[Tuple[str, Dict[str, Any]]],
-        final_stats: Dict[str, Dict[str, float]],
-        motifs_dir: str,
+        records: list[dict[str, Any]],
+        result_dir: Path,
+        promoters: EncodedSequences,
         metric: str,
-        promoters: SequenceBatch,
     ) -> None:
-        def stats_key(name: str, params: Dict[str, Any]) -> str:
-            return f"{name}_{format_params(params)}"
-
-        sorted_indices = sorted(
-            range(len(final_info)),
-            key=lambda index: final_stats[
-                stats_key(final_info[index][0], final_info[index][1])
-            ][metric],
-            reverse=True,
+        ordered = sorted(
+            records, key=lambda item: item["metrics"][metric], reverse=True
         )
-        motifs_sorted = [final_motifs[index] for index in sorted_indices]
-        info_sorted = [final_info[index] for index in sorted_indices]
+        models_dir = result_dir / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        paths = [
+            models_dir / f"rank_{rank:03d}_{_safe_name(record['name'])}"
+            for rank, record in enumerate(ordered, start=1)
+        ]
+        meme_path = models_dir / "all_motifs_in_pfm_form.meme"
+        stats_path = result_dir / "statistics.json"
+        for path in [*paths, meme_path, stats_path]:
+            _check_new_path(path)
 
-        models_dir = os.path.join(motifs_dir, "models")
-        os.makedirs(models_dir, exist_ok=True)
-        print(f"Saving {len(motifs_sorted)} individual models to {models_dir}...")
-
-        pfms = [_ensure_pfm(motif, promoters) for motif in motifs_sorted]
-        metadata = [(motif.name, motif.length) for motif in motifs_sorted]
+        pfms = [_ensure_pfm(record["model"], promoters) for record in ordered]
         write_meme(
-            pfms, metadata, os.path.join(models_dir, "all_motifs_in_pfm_form.meme")
+            pfms,
+            [(record["name"], record["model"].motif_length) for record in ordered],
+            meme_path,
         )
-
-        for rank, motif in enumerate(motifs_sorted, start=1):
-            joblib.dump(
-                motif,
-                os.path.join(models_dir, f"{rank:03d}_{_safe_name(motif.name)}.pkl"),
+        entries = []
+        for rank, (path, record) in enumerate(
+            zip(paths, ordered, strict=True), start=1
+        ):
+            write_model(path, record["model"])
+            entries.append(
+                {
+                    "rank": rank,
+                    "model": path.relative_to(result_dir).as_posix(),
+                    "name": record["name"],
+                    "params": dict(record["params"]),
+                    "metrics": dict(record["metrics"]),
+                }
             )
-
-        self._save_json(final_stats, os.path.join(motifs_dir, "statistics.json"))
-
-        for index, (name, params) in enumerate(info_sorted, start=1):
-            stats = final_stats[stats_key(name, params)]
-            params_str = ", ".join(f"{key}={params[key]}" for key in sorted(params))
-            parts = [
-                f"{key}={stats[key]:.4f}"
-                for key in ["auPRC", "auROC", "pauPRC", "pauROC"]
-                if key in stats
-            ]
-            print(f"Motif {index}: {name}; {params_str}; " + "; ".join(parts))
-
-    @staticmethod
-    def _save_json(data: Dict, path: str) -> None:
-        with open(path, "w") as handle:
-            json.dump(data, handle, indent=2)
+        _write_statistics(stats_path, self.discovery_tool.name, entries)
 
 
-def _ensure_pfm(model: GenericModel, sequences: SequenceBatch):
-    pfm = model.config.get("_source_pfm")
-    if pfm is None:
-        pfm = model.config.get("_derived_pfm")
-    if pfm is None:
-        pfm = get_pfm(model, sequences, top_fraction=0.10)
-        model.config["_derived_pfm"] = pfm
-    return pfm
+def _temporary_discovery_dir(output_dir: str, tool: str):
+    import tempfile
+
+    return tempfile.TemporaryDirectory(
+        prefix="full_", dir=os.path.join(output_dir, tool)
+    )
+
+
+def _check_new_path(path: Path) -> None:
+    if path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing output: {path}")
+
+
+def _write_statistics(path: Path, tool: str, motifs: list[dict[str, Any]]) -> None:
+    path.write_text(
+        json.dumps(
+            {"schema_version": 1, "tool": tool, "motifs": motifs},
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _ensure_pfm(model: MotifModel, sequences: EncodedSequences):
+    return reconstruct_pfm(
+        model,
+        sequences,
+        TopFractionHits(0.10, BestPerSequence()),
+        strands="best",
+    )
 
 
 def _safe_name(name: str) -> str:
     return name.replace("/", "_").replace("\\", "_").replace(":", "-")
 
 
-def _iter_param_grid(
-    discovery_params: Dict[str, Iterable[Any]],
-) -> Iterable[Dict[str, Any]]:
-    param_keys = sorted(discovery_params)
-    param_values = [discovery_params[key] for key in param_keys]
-    for combination in itertools.product(*param_values):
-        yield dict(zip(param_keys, combination))
+def _iter_param_grid(discovery_params: dict[str, Iterable[Any]]):
+    keys = list(discovery_params)
+    values = [tuple(discovery_params[key]) for key in keys]
+    for combination in itertools.product(*values):
+        yield dict(zip(keys, combination, strict=True))
 
 
-def _bootstrap_motifs_for_params(
-    bootstrap_motifs: List[GenericModel],
-    current_params: Dict[str, Any],
-) -> Tuple[List[GenericModel], List[GenericModel]]:
-    param_suffix = format_params(current_params)
-    odd_suffix = f"_{param_suffix}_odd"
-    even_suffix = f"_{param_suffix}_even"
-    odd_motifs = [
-        motif for motif in bootstrap_motifs if motif.name.endswith(odd_suffix)
-    ]
-    even_motifs = [
-        motif for motif in bootstrap_motifs if motif.name.endswith(even_suffix)
-    ]
-    return odd_motifs, even_motifs
+def _average_metrics(pair: MatchedPair) -> dict[str, float]:
+    return {
+        metric: (float(pair.query.metrics[metric]) + float(pair.target.metrics[metric]))
+        / 2.0
+        for metric in VALIDATION_METRICS
+    }
 
 
-def _comparison_column(frame: pd.DataFrame, comparator) -> str:
-    criterion = getattr(comparator, "comparison_criterion", None)
-    if criterion is None:
-        raise ValueError("Comparator must define comparison_criterion.")
-
-    column = getattr(
-        comparator,
-        "comparison_column",
-        comparison_column_for_criterion(criterion),
-    )
-    if column in frame.columns:
-        return column
-    if column == "adj.p-value":
-        raise ValueError(MISSING_ADJUSTED_PVALUE_MESSAGE)
-    raise ValueError(f"Comparison results do not contain comparison column: {column}")
-
-
-def _comparison_sort_ascending(comparator) -> bool:
-    criterion = getattr(comparator, "comparison_criterion", None)
-    if criterion == "p-value":
-        return True
-    if criterion == "score":
-        return False
-    raise ValueError(f"Unsupported comparison criterion: {criterion}")
-
-
-def _comparison_threshold(comparator) -> float:
-    criterion = getattr(comparator, "comparison_criterion", None)
-    threshold = getattr(comparator, "comparison_threshold", None)
-    if threshold is None:
-        return default_threshold_for_criterion(criterion)
-    return float(threshold)
-
-
-def _is_similar_value(comparator, value: float) -> bool:
-    if pd.isna(value):
-        return False
-    criterion = getattr(comparator, "comparison_criterion", None)
-    threshold = _comparison_threshold(comparator)
-    if criterion == "p-value":
-        return value <= threshold
-    if criterion == "score":
-        return value >= threshold
-    raise ValueError(f"Unsupported comparison criterion: {criterion}")
-
-
-def _filter_similar_matches(frame: pd.DataFrame, comparator) -> pd.DataFrame:
-    column = _comparison_column(frame, comparator)
-    mask = frame[column].map(lambda value: _is_similar_value(comparator, float(value)))
-    return frame[mask].reset_index(drop=True)
-
-
-def _sort_comparisons(frame: pd.DataFrame, comparator) -> pd.DataFrame:
-    column = _comparison_column(frame, comparator)
-    return frame.sort_values(
-        by=column, ascending=_comparison_sort_ascending(comparator)
-    ).reset_index(drop=True)
-
-
-def _deduplicate_matches(frame: pd.DataFrame) -> pd.DataFrame:
-    return (
-        frame.drop_duplicates(subset=["query"])
-        .drop_duplicates(subset=["target"])
-        .reset_index(drop=True)
-    )
+def _average_metric(pair: MatchedPair, metric: str) -> float:
+    return _average_metrics(pair)[metric]
 
 
 def _select_nonredundant_motifs(
-    motifs: List[GenericModel],
-    statistics: Dict[str, Any],
+    motifs: list[EvaluatedMotif],
     metric: str,
-    comparator,
-    sequences,
-) -> List[GenericModel]:
-    sorted_motifs = sorted(
-        motifs,
-        key=lambda motif: statistics.get(motif.name, {}).get(metric, 0.0),
-        reverse=True,
-    )
-    selected: List[GenericModel] = []
-    for motif in sorted_motifs:
+    sequences: EncodedSequences,
+    mimosa_metric: str,
+    jobs: int,
+    criterion: str,
+    threshold: float,
+    null_distribution,
+    search_range: int,
+) -> list[EvaluatedMotif]:
+    selected: list[EvaluatedMotif] = []
+    for motif in sorted(
+        motifs, key=lambda item: item.metrics.get(metric, 0.0), reverse=True
+    ):
         if not selected:
             selected.append(motif)
             continue
-
-        frame = comparator.compare([motif], selected, sequences=sequences)
-        similar = _filter_similar_matches(frame, comparator)
-        if similar.empty:
+        pairs = compare_records(
+            motif,
+            selected,
+            sequences,
+            metric=mimosa_metric,
+            jobs=jobs,
+            null_distribution=null_distribution,
+            search_range=search_range,
+        )
+        if not filter_similar(pairs, criterion, threshold):
             selected.append(motif)
     return selected
 
 
-def _attach_average_metrics(
-    frame: pd.DataFrame, statistics: Dict[str, Any]
-) -> pd.DataFrame:
-    frame = frame.copy()
-    for metric in VALIDATION_METRICS:
-        frame[metric] = [
-            (
-                statistics.get(row["query"], {}).get(metric, 0.0)
-                + statistics.get(row["target"], {}).get(metric, 0.0)
-            )
-            / 2.0
-            for _, row in frame.iterrows()
-        ]
-    return frame
+def _candidate_value(first: MatchedPair, second: MatchedPair, criterion: str) -> float:
+    from .comparison import comparison_value
+
+    return (
+        comparison_value(first, criterion) + comparison_value(second, criterion)
+    ) / 2.0
 
 
 def _deduplicate_final_motifs(
-    final_motifs: List[GenericModel],
-    final_info: List[Tuple[str, Dict[str, Any]]],
-    final_stats: Dict[str, Dict[str, float]],
+    records: list[dict[str, Any]],
     metric: str,
-    comparator,
-    sequences,
-) -> Tuple[
-    List[GenericModel], List[Tuple[str, Dict[str, Any]]], Dict[str, Dict[str, float]]
-]:
-    def stats_key(name: str, params: Dict[str, Any]) -> str:
-        return f"{name}_{format_params(params)}"
-
-    sorted_indices = sorted(
-        range(len(final_motifs)),
-        key=lambda index: final_stats[
-            stats_key(final_info[index][0], final_info[index][1])
-        ][metric],
-        reverse=True,
-    )
-
-    kept_indices: List[int] = []
-    kept_motifs: List[GenericModel] = []
-    for index in sorted_indices:
-        motif = final_motifs[index]
-        if not kept_motifs:
-            kept_indices.append(index)
-            kept_motifs.append(motif)
+    sequences: EncodedSequences,
+    mimosa_metric: str,
+    jobs: int,
+    criterion: str,
+    threshold: float,
+    null_distribution,
+    search_range: int,
+) -> list[dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
+    for record in sorted(
+        records, key=lambda item: item["metrics"][metric], reverse=True
+    ):
+        if not kept:
+            kept.append(record)
             continue
-
-        frame = comparator.compare([motif], kept_motifs, sequences=sequences)
-        similar = _filter_similar_matches(frame, comparator)
-        if similar.empty:
-            kept_indices.append(index)
-            kept_motifs.append(motif)
-
-    deduplicated_motifs = [final_motifs[index] for index in kept_indices]
-    deduplicated_info = [final_info[index] for index in kept_indices]
-    deduplicated_stats = {
-        stats_key(name, params): final_stats[stats_key(name, params)]
-        for name, params in deduplicated_info
-    }
-    return deduplicated_motifs, deduplicated_info, deduplicated_stats
+        pairs = compare_records(
+            record["model"],
+            [item["model"] for item in kept],
+            sequences,
+            metric=mimosa_metric,
+            jobs=jobs,
+            null_distribution=null_distribution,
+            search_range=search_range,
+        )
+        if not filter_similar(pairs, criterion, threshold):
+            kept.append(record)
+    return kept

@@ -1,50 +1,50 @@
 from __future__ import annotations
 
-from mimosa.types import ComparisonResult
+from dataclasses import replace
 
-from motifhorde.comparison import UniversalMotifComparator
-from motifhorde.models import GenericModel
+import pytest
+
+from motifhorde.comparison import (
+    compare_records,
+    deduplicate_pairs,
+    filter_similar,
+    sort_pairs,
+)
+from motifhorde.evaluation import EvaluatedMotif
 
 
-def motif(name: str) -> GenericModel:
-    return GenericModel("test", name, None, 1, {})
-
-
-def test_universal_comparator_uses_mimosa_api_for_adjusted_pvalues(monkeypatch):
-    calls = []
-
-    def fake_compare_one_to_many(**kwargs):
-        calls.append(kwargs)
-        return [
-            ComparisonResult(
-                query="query",
-                target="target",
-                score=0.7,
-                offset=0,
-                orientation="++",
-                metric="co",
-                adj_p_value=0.03,
-            )
-        ]
-
-    monkeypatch.setattr(
-        "motifhorde.comparison.mimosa_compare_one_to_many",
-        fake_compare_one_to_many,
+def _record(model, identifier, metrics=None):
+    return EvaluatedMotif(
+        model,
+        identifier,
+        identifier.split(":")[0],
+        "odd",
+        {},
+        metrics or {"auPRC": 0.5, "auROC": 0.5, "pauPRC": 0.5, "pauROC": 0.5},
     )
-    comparator = UniversalMotifComparator(
-        metric="co",
-        comparison_criterion="p-value",
-        pvalue=True,
-        null_distribution="profile-null.joblib",
+
+
+@pytest.mark.parametrize("metric", ["co", "dice", "cosine"])
+def test_supported_profile_metrics_return_stable_pairs(pwm_model, sequences, metric):
+    query = _record(pwm_model, "q")
+    target = _record(replace(pwm_model, name="target"), "t")
+
+    pairs = compare_records(query, [target], sequences, metric=metric, jobs=1)
+
+    assert len(pairs) == 1
+    assert pairs[0].query is query
+    assert pairs[0].target is target
+    assert pairs[0].result.metric == metric
+
+
+def test_pair_filtering_sorting_and_deduplication(pwm_model, sequences):
+    query = _record(pwm_model, "q")
+    targets = [_record(replace(pwm_model, name=f"t{i}"), f"t{i}") for i in range(2)]
+    pairs = compare_records(query, targets, sequences, metric="co", jobs=1)
+
+    observed = deduplicate_pairs(
+        sort_pairs(filter_similar(pairs, "score", -1), "score")
     )
-    query = motif("query")
-    target = motif("target")
 
-    frame = comparator.compare([query], [target], sequences="sequences")
-
-    assert calls[0]["query"] is query
-    assert calls[0]["targets"] == [target]
-    assert calls[0]["strategy"] == "profile"
-    assert calls[0]["sequences"] == "sequences"
-    assert calls[0]["comparator"] is comparator.config
-    assert frame.loc[0, "adj.p-value"] == 0.03
+    assert len(observed) == 1
+    assert observed[0].target is targets[0]

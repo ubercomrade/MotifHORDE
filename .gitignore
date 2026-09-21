@@ -179,3 +179,10 @@ Makefile
 # Package data bundled into wheels/sdists.
 !src/motifhorde/bin/
 !src/motifhorde/bin/**
+
+################################################################################
+# Other
+################################################################################
+
+REMEDIATION_PLAN.md
+PLAN.md
