@@ -23,10 +23,12 @@ def _require_fullrun(command_env: str) -> str:
     return command
 
 
-def _require_jar(jar_env: str, default: str) -> str:
+def _require_jar(jar_env: str) -> str:
     if os.environ.get("HORDEMOTIFS_RUN_FULLRUN") != "1":
         pytest.skip("set HORDEMOTIFS_RUN_FULLRUN=1 to run external smoke tests")
-    jar = os.environ.get(jar_env, default)
+    jar = os.environ.get(jar_env)
+    if not jar:
+        pytest.skip(f"set {jar_env} to run this external smoke test")
     if not Path(jar).is_file():
         pytest.skip(f"Jstacs JAR is missing: {jar}")
     return jar
@@ -52,24 +54,22 @@ def test_meme_full_pipeline_smoke(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("tool_cls", "jar_env", "jar_default"),
+    ("tool_cls", "jar_env"),
     [
         pytest.param(
             DimontDiscoveryTool,
             "HORDEMOTIFS_DIMONT_JAR",
-            "/home/anton/Programs/Jstacs/Dimont.jar",
-            id="dimont-/home/anton/Programs/Jstacs/Dimont.jar",
+            id="dimont",
         ),
         pytest.param(
             SlimDiscoveryTool,
             "HORDEMOTIFS_SLIM_JAR",
-            "/home/anton/Programs/Jstacs/SlimDimont.jar",
-            id="slim-/home/anton/Programs/Jstacs/SlimDimont.jar",
+            id="slim",
         ),
     ],
 )
-def test_jstacs_full_pipeline_smoke(tool_cls, jar_env, jar_default, tmp_path):
-    jar = _require_jar(jar_env, jar_default)
+def test_jstacs_full_pipeline_smoke(tool_cls, jar_env, tmp_path):
+    jar = _require_jar(jar_env)
     java = os.environ.get("HORDEMOTIFS_JAVA_COMMAND", "java")
     foreground, background = _small_inputs()
     models = tool_cls(jar_path=jar, java_command=java, threads=1).discover(

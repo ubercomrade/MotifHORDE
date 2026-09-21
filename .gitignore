@@ -186,3 +186,14 @@ Makefile
 
 REMEDIATION_PLAN.md
 PLAN.md
+
+# Legacy local test data removed from the index; recoverable from git history.
+/train.fa
+/tests/test_output.fa
+/tests/test_data/PEAKS*
+/tests/test_data/gimme/
+/tests/test_data/gimme.sh
+/tests/test_data/hist_pass
+/tests/test_data/prc_pass
+/tests/test_data/results/
+/tests/test_data/run.sh
