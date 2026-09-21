@@ -6,15 +6,18 @@ import itertools
 import json
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, TypeVar
 
 import numpy as np
 from mimosa import (
     BestPerSequence,
     EncodedSequences,
     MotifModel,
+    NullDistribution,
     TopFractionHits,
     read_fasta,
     reconstruct_pfm,
@@ -22,12 +25,11 @@ from mimosa import (
 )
 
 from .comparison import (
+    ComparisonSettings,
     MatchedPair,
-    SUPPORTED_METRICS,
     comparison_value,
-    compare_records,
-    deduplicate_pairs,
     default_threshold,
+    deduplicate_pairs,
     filter_similar,
     is_similar,
     load_null_distribution,
@@ -43,6 +45,28 @@ from .evaluation import (
 )
 from .io import write_meme
 
+T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class FinalMotif:
+    """A full-data model promoted from a bootstrap pair with its metrics."""
+
+    model: MotifModel
+    name: str
+    params: MappingProxyType
+    metrics: MappingProxyType
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        object.__setattr__(
+            self,
+            "metrics",
+            MappingProxyType(
+                {key: float(value) for key, value in self.metrics.items()}
+            ),
+        )
+
 
 class DeNovoPipeline:
     """Run the MotifHORDE parameter-selection workflow."""
@@ -54,54 +78,45 @@ class DeNovoPipeline:
         mimosa_metric: str = "co",
         comparison_criterion: str = "score",
         comparison_threshold: float | None = None,
-        null_distribution=None,
+        null_distribution: NullDistribution | str | os.PathLike | None = None,
         fpr_threshold: float = 0.001,
         number_of_motifs: int = 5,
         jobs: int = 1,
         seed: int | None = None,
         mimosa_search_range: int = 10,
     ) -> None:
-        if comparison_criterion not in {"score", "p-value"}:
-            raise ValueError("comparison criterion must be 'score' or 'p-value'")
-        if mimosa_metric not in SUPPORTED_METRICS:
-            raise ValueError(f"unsupported Mimosa metric: {mimosa_metric}")
-        if jobs < 1:
-            raise ValueError("jobs must be positive")
-        if mimosa_search_range < 0:
-            raise ValueError("mimosa_search_range must be non-negative")
         if number_of_motifs < 1:
             raise ValueError("number_of_motifs must be positive")
         if not np.isfinite(fpr_threshold) or not 0 <= fpr_threshold <= 1:
             raise ValueError("fpr_threshold must be finite and lie in [0, 1]")
-        if comparison_threshold is not None and not np.isfinite(comparison_threshold):
-            raise ValueError("comparison threshold must be finite")
-        self.discovery_tool = discovery_tool
-        self.evaluator = evaluator
-        self.mimosa_metric = mimosa_metric
-        self.comparison_criterion = comparison_criterion
-        self.comparison_threshold = (
-            default_threshold(comparison_criterion)
-            if comparison_threshold is None
-            else float(comparison_threshold)
-        )
-        self.null_distribution = (
+        null = (
             load_null_distribution(null_distribution)
             if isinstance(null_distribution, (str, os.PathLike))
             else null_distribution
         )
-        if comparison_criterion == "p-value" and self.null_distribution is None:
-            raise ValueError("p-value comparison requires a Mimosa null bundle")
+        self.comparison = ComparisonSettings(
+            metric=mimosa_metric,
+            criterion=comparison_criterion,
+            threshold=(
+                default_threshold(comparison_criterion)
+                if comparison_threshold is None
+                else float(comparison_threshold)
+            ),
+            null_distribution=null,
+            search_range=mimosa_search_range,
+            jobs=jobs,
+        )
         if comparison_criterion == "p-value":
             validate_null_distribution(
-                self.null_distribution,
+                null,
                 metric=mimosa_metric,
                 search_range=mimosa_search_range,
             )
+        self.discovery_tool = discovery_tool
+        self.evaluator = evaluator
         self.fpr_threshold = fpr_threshold
         self.number_of_motifs = number_of_motifs
-        self.jobs = jobs
         self.seed = seed
-        self.mimosa_search_range = mimosa_search_range
 
     def run(
         self,
@@ -123,7 +138,7 @@ class DeNovoPipeline:
             self.discovery_tool,
             self.evaluator,
             output_dir,
-            jobs=self.jobs,
+            jobs=self.comparison.jobs,
             seed=self.seed,
         ).run(
             peaks,
@@ -138,7 +153,7 @@ class DeNovoPipeline:
         match_groups = self._compare_bootstrap_motifs(
             records, discovery_params, peaks, metric
         )
-        final_records = self._select_final_motifs(
+        final_motifs = self._select_final_motifs(
             match_groups,
             peaks,
             promoters,
@@ -147,18 +162,12 @@ class DeNovoPipeline:
             output_dir,
             metric,
         )
-        final_records = _deduplicate_final_motifs(
-            final_records,
-            metric,
+        final_motifs = _select_nonredundant(
+            [(motif.model, motif.metrics[metric], motif) for motif in final_motifs],
             peaks,
-            self.mimosa_metric,
-            self.jobs,
-            self.comparison_criterion,
-            self.comparison_threshold,
-            self.null_distribution,
-            self.mimosa_search_range,
+            self.comparison,
         )
-        self._save_results(final_records, paths["motifs"], promoters, metric)
+        self._save_results(final_motifs, paths["motifs"], promoters, metric)
 
     def _prepare_output_dirs(self, output_dir: str) -> dict[str, Path]:
         root = Path(output_dir) / self.discovery_tool.name
@@ -226,61 +235,39 @@ class DeNovoPipeline:
     ) -> list[dict[str, Any]]:
         groups: list[dict[str, Any]] = []
         for params in _iter_param_grid(discovery_params):
-            odd = [
-                record
-                for record in records
-                if record.split == "odd" and dict(record.params) == params
-            ]
-            even = [
-                record
-                for record in records
-                if record.split == "even" and dict(record.params) == params
-            ]
-            if not odd or not even:
-                continue
-            odd = _select_nonredundant_motifs(
-                odd,
-                metric,
-                peaks,
-                self.mimosa_metric,
-                self.jobs,
-                self.comparison_criterion,
-                self.comparison_threshold,
-                self.null_distribution,
-                self.mimosa_search_range,
-            )
-            even = _select_nonredundant_motifs(
-                even,
-                metric,
-                peaks,
-                self.mimosa_metric,
-                self.jobs,
-                self.comparison_criterion,
-                self.comparison_threshold,
-                self.null_distribution,
-                self.mimosa_search_range,
-            )
-            pairs: list[MatchedPair] = []
-            for query in odd:
-                pairs.extend(
-                    compare_records(
-                        query,
-                        even,
+            splits: list[list[EvaluatedMotif]] = []
+            for split in ("odd", "even"):
+                split_records = [
+                    record
+                    for record in records
+                    if record.split == split and dict(record.params) == params
+                ]
+                if not split_records:
+                    continue
+                splits.append(
+                    _select_nonredundant(
+                        [
+                            (record.model, record.metrics.get(metric, 0.0), record)
+                            for record in split_records
+                        ],
                         peaks,
-                        metric=self.mimosa_metric,
-                        jobs=self.jobs,
-                        null_distribution=self.null_distribution,
-                        search_range=self.mimosa_search_range,
+                        self.comparison,
                     )
                 )
+            if len(splits) < 2:
+                continue
+            odd, even = splits
+            pairs: list[MatchedPair] = []
+            for query in odd:
+                pairs.extend(self.comparison.compare(query, even, peaks))
             pairs = deduplicate_pairs(
                 sort_pairs(
                     filter_similar(
                         pairs,
-                        self.comparison_criterion,
-                        self.comparison_threshold,
+                        self.comparison.criterion,
+                        self.comparison.threshold,
                     ),
-                    self.comparison_criterion,
+                    self.comparison.criterion,
                 )
             )
             if pairs:
@@ -296,8 +283,10 @@ class DeNovoPipeline:
         background_path: str,
         output_dir: str,
         metric: str,
-    ) -> list[dict[str, Any]]:
-        final: list[dict[str, Any]] = []
+    ) -> list[FinalMotif]:
+        criterion = self.comparison.criterion
+        threshold = self.comparison.threshold
+        final: list[FinalMotif] = []
         for group in match_groups:
             params = dict(group["params"])
             with _temporary_discovery_dir(
@@ -321,32 +310,18 @@ class DeNovoPipeline:
                 for index, model in enumerate(full_motifs):
                     if index in assigned:
                         continue
-                    odd = compare_records(
-                        model,
-                        [pair.query],
-                        peaks,
-                        metric=self.mimosa_metric,
-                        jobs=self.jobs,
-                        null_distribution=self.null_distribution,
-                        search_range=self.mimosa_search_range,
-                    )[0]
-                    even = compare_records(
-                        model,
-                        [pair.target],
-                        peaks,
-                        metric=self.mimosa_metric,
-                        jobs=self.jobs,
-                        null_distribution=self.null_distribution,
-                        search_range=self.mimosa_search_range,
-                    )[0]
-                    if is_similar(
-                        odd, self.comparison_criterion, self.comparison_threshold
-                    ) and is_similar(
-                        even, self.comparison_criterion, self.comparison_threshold
+                    odd = self.comparison.compare(model, [pair.query], peaks)[0]
+                    even = self.comparison.compare(model, [pair.target], peaks)[0]
+                    if is_similar(odd, criterion, threshold) and is_similar(
+                        even, criterion, threshold
                     ):
                         candidates.append(
                             (
-                                _candidate_value(odd, even, self.comparison_criterion),
+                                (
+                                    comparison_value(odd, criterion)
+                                    + comparison_value(even, criterion)
+                                )
+                                / 2.0,
                                 index,
                                 model,
                             )
@@ -355,34 +330,32 @@ class DeNovoPipeline:
                     continue
                 best = (
                     min(candidates, key=lambda item: item[0])
-                    if self.comparison_criterion == "p-value"
+                    if criterion == "p-value"
                     else max(candidates, key=lambda item: item[0])
                 )
                 assigned.add(best[1])
                 final.append(
-                    {
-                        "model": best[2],
-                        "name": best[2].name,
-                        "params": params,
-                        "metrics": _average_metrics(pair),
-                    }
+                    FinalMotif(
+                        model=best[2],
+                        name=best[2].name,
+                        params=params,
+                        metrics=_average_metrics(pair),
+                    )
                 )
         return final
 
     def _save_results(
         self,
-        records: list[dict[str, Any]],
+        records: list[FinalMotif],
         result_dir: Path,
         promoters: EncodedSequences,
         metric: str,
     ) -> None:
-        ordered = sorted(
-            records, key=lambda item: item["metrics"][metric], reverse=True
-        )
+        ordered = sorted(records, key=lambda item: item.metrics[metric], reverse=True)
         models_dir = result_dir / "models"
         models_dir.mkdir(parents=True, exist_ok=True)
         paths = [
-            models_dir / f"rank_{rank:03d}_{_safe_name(record['name'])}"
+            models_dir / f"rank_{rank:03d}_{_safe_name(record.name)}"
             for rank, record in enumerate(ordered, start=1)
         ]
         meme_path = models_dir / "all_motifs_in_pfm_form.meme"
@@ -390,24 +363,24 @@ class DeNovoPipeline:
         for path in [*paths, meme_path, stats_path]:
             _check_new_path(path)
 
-        pfms = [_ensure_pfm(record["model"], promoters) for record in ordered]
+        pfms = [_ensure_pfm(record.model, promoters) for record in ordered]
         write_meme(
             pfms,
-            [(record["name"], record["model"].motif_length) for record in ordered],
+            [(record.name, record.model.motif_length) for record in ordered],
             meme_path,
         )
         entries = []
         for rank, (path, record) in enumerate(
             zip(paths, ordered, strict=True), start=1
         ):
-            write_model(path, record["model"])
+            write_model(path, record.model)
             entries.append(
                 {
                     "rank": rank,
                     "model": path.relative_to(result_dir).as_posix(),
-                    "name": record["name"],
-                    "params": dict(record["params"]),
-                    "metrics": dict(record["metrics"]),
+                    "name": record.name,
+                    "params": dict(record.params),
+                    "metrics": dict(record.metrics),
                 }
             )
         _write_statistics(stats_path, self.discovery_tool.name, entries)
@@ -465,74 +438,24 @@ def _average_metrics(pair: MatchedPair) -> dict[str, float]:
 
 
 def _average_metric(pair: MatchedPair, metric: str) -> float:
-    return _average_metrics(pair)[metric]
-
-
-def _select_nonredundant_motifs(
-    motifs: list[EvaluatedMotif],
-    metric: str,
-    sequences: EncodedSequences,
-    mimosa_metric: str,
-    jobs: int,
-    criterion: str,
-    threshold: float,
-    null_distribution,
-    search_range: int,
-) -> list[EvaluatedMotif]:
-    selected: list[EvaluatedMotif] = []
-    for motif in sorted(
-        motifs, key=lambda item: item.metrics.get(metric, 0.0), reverse=True
-    ):
-        if not selected:
-            selected.append(motif)
-            continue
-        pairs = compare_records(
-            motif,
-            selected,
-            sequences,
-            metric=mimosa_metric,
-            jobs=jobs,
-            null_distribution=null_distribution,
-            search_range=search_range,
-        )
-        if not filter_similar(pairs, criterion, threshold):
-            selected.append(motif)
-    return selected
-
-
-def _candidate_value(first: MatchedPair, second: MatchedPair, criterion: str) -> float:
     return (
-        comparison_value(first, criterion) + comparison_value(second, criterion)
+        float(pair.query.metrics[metric]) + float(pair.target.metrics[metric])
     ) / 2.0
 
 
-def _deduplicate_final_motifs(
-    records: list[dict[str, Any]],
-    metric: str,
+def _select_nonredundant(
+    items: Sequence[tuple[MotifModel, float, T]],
     sequences: EncodedSequences,
-    mimosa_metric: str,
-    jobs: int,
-    criterion: str,
-    threshold: float,
-    null_distribution,
-    search_range: int,
-) -> list[dict[str, Any]]:
-    kept: list[dict[str, Any]] = []
-    for record in sorted(
-        records, key=lambda item: item["metrics"][metric], reverse=True
-    ):
-        if not kept:
-            kept.append(record)
+    settings: ComparisonSettings,
+) -> list[T]:
+    """Greedily keep best-scoring items dissimilar to every kept item."""
+    selected: list[tuple[MotifModel, float, T]] = []
+    for item in sorted(items, key=lambda entry: entry[1], reverse=True):
+        if selected and filter_similar(
+            settings.compare(item[0], [kept[0] for kept in selected], sequences),
+            settings.criterion,
+            settings.threshold,
+        ):
             continue
-        pairs = compare_records(
-            record["model"],
-            [item["model"] for item in kept],
-            sequences,
-            metric=mimosa_metric,
-            jobs=jobs,
-            null_distribution=null_distribution,
-            search_range=search_range,
-        )
-        if not filter_similar(pairs, criterion, threshold):
-            kept.append(record)
-    return kept
+        selected.append(item)
+    return [item[2] for item in selected]

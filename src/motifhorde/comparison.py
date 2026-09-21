@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from math import isfinite
 from pathlib import Path
 from typing import Any, Iterable
 
 from mimosa import (
+    EncodedSequences,
     HybridEmpiricalLogTail,
     MotifModel,
     NullDistribution,
@@ -31,6 +33,45 @@ class MatchedPair:
     query: Any
     target: Any
     result: Any
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonSettings:
+    """Validated Mimosa comparison parameters shared by all pipeline stages."""
+
+    metric: str
+    criterion: str
+    threshold: float
+    null_distribution: NullDistribution | None = None
+    search_range: int = 10
+    jobs: int = 1
+
+    def __post_init__(self) -> None:
+        if self.metric not in SUPPORTED_METRICS:
+            raise ValueError(f"unsupported Mimosa metric: {self.metric}")
+        if self.criterion not in {"score", "p-value"}:
+            raise ValueError("comparison criterion must be 'score' or 'p-value'")
+        if self.jobs < 1:
+            raise ValueError("comparison jobs must be positive")
+        if self.search_range < 0:
+            raise ValueError("comparison search_range must be non-negative")
+        if not isfinite(self.threshold):
+            raise ValueError("comparison threshold must be finite")
+        if self.criterion == "p-value" and self.null_distribution is None:
+            raise ValueError("p-value comparison requires a Mimosa null bundle")
+
+    def compare(
+        self, query: Any, targets: Iterable[Any], sequences: EncodedSequences
+    ) -> list[MatchedPair]:
+        return compare_records(
+            query,
+            targets,
+            sequences,
+            metric=self.metric,
+            jobs=self.jobs,
+            null_distribution=self.null_distribution,
+            search_range=self.search_range,
+        )
 
 
 def load_null_distribution(path: str | Path) -> NullDistribution:

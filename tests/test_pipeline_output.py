@@ -4,13 +4,15 @@ import json
 import os
 from dataclasses import replace
 
+import numpy as np
 import pytest
 from mimosa import EncodedSequences, build_null, read_model
 from mimosa.io import write_null_bundle
 
+from motifhorde.comparison import ComparisonSettings
 from motifhorde.discovery import MotifDiscoveryTool
-from motifhorde.evaluation import PerformanceEvaluator
-from motifhorde.pipeline import DeNovoPipeline
+from motifhorde.evaluation import EvaluatedMotif, PerformanceEvaluator
+from motifhorde.pipeline import DeNovoPipeline, _select_nonredundant
 
 
 class FakeDiscovery(MotifDiscoveryTool):
@@ -25,6 +27,36 @@ class FakeDiscovery(MotifDiscoveryTool):
             replace(self.model, name=f"Fake-{index}")
             for index in range(1, number_of_motifs + 1)
         ]
+
+
+def test_select_nonredundant_keeps_best_of_similar_motifs(pwm_model):
+    # Profile windows need sequences wider than the window radius, otherwise
+    # Mimosa reports no sites and every score collapses to zero.
+    rng = np.random.default_rng(5)
+    long_sequences = EncodedSequences.from_strings(
+        ["".join(rng.choice(list("ACGT"), 60)) for _ in range(8)]
+    )
+    worse = EvaluatedMotif(
+        replace(pwm_model, name="Similar"),
+        "worse",
+        "task_0000",
+        "odd",
+        {},
+        {"pauROC": 0.4},
+    )
+    best = EvaluatedMotif(pwm_model, "best", "task_0001", "odd", {}, {"pauROC": 0.9})
+    settings = ComparisonSettings(metric="co", criterion="score", threshold=0.9)
+
+    kept = _select_nonredundant(
+        [
+            (worse.model, worse.metrics["pauROC"], worse),
+            (best.model, best.metrics["pauROC"], best),
+        ],
+        long_sequences,
+        settings,
+    )
+
+    assert [record.id for record in kept] == ["best"]
 
 
 def test_pipeline_writes_versioned_bundles_and_refuses_overwrite(tmp_path, pwm_model):
