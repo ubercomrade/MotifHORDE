@@ -150,7 +150,11 @@ def compare_records(
     null_distribution: NullDistribution | None = None,
     search_range: int = 10,
 ) -> list[MatchedPair]:
-    """Compare one query against targets in stable target order."""
+    """Compare one query against targets in stable target order.
+
+    The null distribution is used as given: callers passing a foreign
+    bundle must validate it with validate_null_distribution themselves.
+    """
     if metric not in SUPPORTED_METRICS:
         raise ValueError(f"unsupported Mimosa metric: {metric}")
     if jobs < 1:
@@ -158,13 +162,6 @@ def compare_records(
     if search_range < 0:
         raise ValueError("comparison search_range must be non-negative")
     target_records = list(targets)
-    if null_distribution is not None:
-        validate_null_distribution(
-            null_distribution,
-            metric=metric,
-            search_range=search_range,
-            sequences=sequences,
-        )
     query_model = _model(query)
     query_for_mimosa = _named(query_model, _identity(query, query_model))
     target_models = [

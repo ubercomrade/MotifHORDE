@@ -133,6 +133,13 @@ class DeNovoPipeline:
         peaks, peak_names = self._read_sequences(foreground_path)
         background, background_names = self._read_sequences(background_path)
         promoters, _ = self._read_sequences(promoters_path)
+        if self.comparison.null_distribution is not None:
+            validate_null_distribution(
+                self.comparison.null_distribution,
+                metric=self.comparison.metric,
+                search_range=self.comparison.search_range,
+                sequences=peaks,
+            )
 
         records = Bootstrapper(
             self.discovery_tool,

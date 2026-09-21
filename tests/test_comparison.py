@@ -15,6 +15,7 @@ from motifhorde.comparison import (
     is_similar,
     load_null_distribution,
     sort_pairs,
+    validate_null_distribution,
 )
 from motifhorde.evaluation import EvaluatedMotif
 
@@ -113,32 +114,19 @@ def test_pvalue_comparison_loads_directory_bundle_and_applies_bh_per_query(
     assert all(0 <= pair.result.adj_p_value <= 1 for pair in pairs)
 
 
-def test_pvalue_comparison_rejects_incompatible_metric_and_parameters(
+def test_null_bundle_validation_rejects_incompatible_metric_and_parameters(
     tmp_path, pwm_model, sequences
 ):
     path = _write_null_bundle(tmp_path, pwm_model, sequences, search_range=9)
     null_distribution = load_null_distribution(path)
-    query = _record(pwm_model, "query")
-    target = _record(replace(pwm_model, name="target"), "target")
 
     with pytest.raises(ValueError, match="incompatible"):
-        compare_records(
-            query,
-            [target],
-            sequences,
-            metric="co",
-            jobs=1,
-            search_range=10,
-            null_distribution=null_distribution,
+        validate_null_distribution(
+            null_distribution, metric="co", search_range=10, sequences=sequences
         )
     with pytest.raises(ValueError, match="incompatible"):
-        compare_records(
-            query,
-            [target],
-            sequences,
-            metric="dice",
-            jobs=1,
-            null_distribution=null_distribution,
+        validate_null_distribution(
+            null_distribution, metric="dice", search_range=9, sequences=sequences
         )
 
 
