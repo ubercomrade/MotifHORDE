@@ -59,6 +59,12 @@ def test_select_nonredundant_keeps_best_of_similar_motifs(pwm_model):
     assert [record.id for record in kept] == ["best"]
 
 
+def test_pipeline_fills_default_comparison_threshold():
+    pipeline = DeNovoPipeline(FakeDiscovery(None), PerformanceEvaluator("peaks"))
+
+    assert pipeline.comparison.threshold == pytest.approx(0.9)
+
+
 def test_pipeline_writes_versioned_bundles_and_refuses_overwrite(tmp_path, pwm_model):
     foreground = tmp_path / "foreground.fa"
     background = tmp_path / "background.fa"

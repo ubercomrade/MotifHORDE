@@ -8,7 +8,6 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .comparison import default_threshold
 from .discovery import (
     BammDiscoveryTool,
     DimontDiscoveryTool,
@@ -141,8 +140,6 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--nmotifs must be positive")
     if not 0 <= args.fpr <= 1:
         parser.error("--fpr must lie in [0, 1]")
-    if args.comparison_threshold is None:
-        args.comparison_threshold = default_threshold(args.comparison_criterion)
     if args.comparison_criterion == "p-value" and not args.mimosa_null_distribution:
         parser.error(
             "--comparison-criterion p-value requires --mimosa-null-distribution"
