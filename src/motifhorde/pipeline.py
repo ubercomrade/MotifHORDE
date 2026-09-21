@@ -6,7 +6,7 @@ import itertools
 import json
 import os
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -396,7 +396,7 @@ class DeNovoPipeline:
         _write_statistics(stats_path, self.discovery_tool.name, entries)
 
 
-def _temporary_discovery_dir(output_dir: str, tool: str):
+def _temporary_discovery_dir(output_dir: str, tool: str) -> tempfile.TemporaryDirectory:
     return tempfile.TemporaryDirectory(
         prefix="full_", dir=os.path.join(output_dir, tool)
     )
@@ -419,7 +419,7 @@ def _write_statistics(path: Path, tool: str, motifs: list[dict[str, Any]]) -> No
     )
 
 
-def _ensure_pfm(model: MotifModel, sequences: EncodedSequences):
+def _ensure_pfm(model: MotifModel, sequences: EncodedSequences) -> np.ndarray:
     return reconstruct_pfm(
         model,
         sequences,
@@ -437,7 +437,9 @@ def _safe_name(name: str) -> str:
     return name.replace("/", "_").replace("\\", "_").replace(":", "-")
 
 
-def _iter_param_grid(discovery_params: dict[str, Iterable[Any]]):
+def _iter_param_grid(
+    discovery_params: dict[str, Iterable[Any]],
+) -> Iterator[dict[str, Any]]:
     keys = list(discovery_params)
     values = [tuple(discovery_params[key]) for key in keys]
     for combination in itertools.product(*values):

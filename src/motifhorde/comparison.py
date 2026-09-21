@@ -28,7 +28,12 @@ PROFILE_MIN_LOGERR = 0.0
 
 @dataclass(frozen=True, slots=True)
 class MatchedPair:
-    """A Mimosa comparison result retaining the source records."""
+    """A Mimosa comparison result retaining the source records.
+
+    query and target stay Any on purpose: MotifModel, EvaluatedMotif, and
+    FinalMotif records are all accepted; comparison reads the model and a
+    stable identity off each record.
+    """
 
     query: Any
     target: Any
@@ -143,7 +148,7 @@ def _named(model: MotifModel, name: str) -> MotifModel:
 def compare_records(
     query: Any,
     targets: Iterable[Any],
-    sequences,
+    sequences: EncodedSequences,
     *,
     metric: str,
     jobs: int,

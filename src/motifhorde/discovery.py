@@ -28,7 +28,12 @@ logger = logging.getLogger(__name__)
 
 
 class MotifDiscoveryTool(ABC):
-    """Common interface for external discovery adapters."""
+    """Common interface for external discovery adapters.
+
+    discover() consumes these keyword arguments on top of the positional
+    ones: ``length`` for every tool, ``order`` for bamm, and ``lpd``,
+    ``features``, and ``seed`` for sitega.
+    """
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -183,7 +188,7 @@ class StremeDiscoveryTool(MotifDiscoveryTool):
 
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
-    ):
+    ) -> list[MotifModel]:
         _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         output = _run_streme(
@@ -216,7 +221,7 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
 
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
-    ):
+    ) -> list[MotifModel]:
         _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
@@ -279,7 +284,7 @@ class BammDiscoveryTool(MotifDiscoveryTool):
 
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
-    ):
+    ) -> list[MotifModel]:
         _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         order = int(kwargs.get("order", 2))
@@ -459,7 +464,7 @@ class DimontDiscoveryTool(MotifDiscoveryTool):
 
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
-    ):
+    ) -> list[MotifModel]:
         _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
@@ -528,7 +533,7 @@ class SlimDiscoveryTool(MotifDiscoveryTool):
 
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
-    ):
+    ) -> list[MotifModel]:
         _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
@@ -684,7 +689,7 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
 
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
-    ):
+    ) -> list[MotifModel]:
         _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         lpd = int(kwargs.get("lpd", 6))
