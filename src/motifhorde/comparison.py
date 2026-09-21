@@ -7,16 +7,21 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from mimosa import (
+    HybridEmpiricalLogTail,
     MotifModel,
     NullDistribution,
     annotate_results,
     compare_many,
+    normalization_fingerprint,
 )
-from mimosa.io import read_null_bundle
+from mimosa.io import read_null_bundle, sequence_fingerprint
 
 SUPPORTED_METRICS = ("co", "dice", "cosine")
 DEFAULT_SCORE_COMPARISON_THRESHOLD = 0.9
 DEFAULT_PVALUE_COMPARISON_THRESHOLD = 0.05
+PROFILE_WINDOW_RADIUS = 10
+PROFILE_REALIGN_WINDOW = 3
+PROFILE_MIN_LOGERR = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +37,51 @@ def load_null_distribution(path: str | Path) -> NullDistribution:
     bundle = Path(path)
     if not bundle.is_dir():
         raise ValueError(f"Mimosa null distribution must be a directory bundle: {path}")
-    return read_null_bundle(bundle)
+    return NullDistribution(**read_null_bundle(bundle))
+
+
+def validate_null_distribution(
+    distribution: NullDistribution,
+    *,
+    metric: str,
+    search_range: int,
+    sequences=None,
+) -> None:
+    """Check that a null bundle matches this module's public Mimosa call."""
+    if not isinstance(distribution, NullDistribution):
+        raise TypeError("null distribution must be a Mimosa NullDistribution")
+    contract = distribution.contract
+    expected_normalization = normalization_fingerprint(HybridEmpiricalLogTail())
+    expected = {
+        "metric": metric,
+        "search_range": search_range,
+        "window_radius": PROFILE_WINDOW_RADIUS,
+        "realign_window": PROFILE_REALIGN_WINDOW,
+        "min_logerr": PROFILE_MIN_LOGERR,
+        "normalization_version": expected_normalization,
+        "background_fingerprint": "none",
+    }
+    actual = {
+        "metric": distribution.metric,
+        "search_range": contract["search_range"],
+        "window_radius": contract["window_radius"],
+        "realign_window": contract["realign_window"],
+        "min_logerr": float(contract["min_logerr"]),
+        "normalization_version": contract["normalization_version"],
+        "background_fingerprint": distribution.background_fingerprint,
+    }
+    if sequences is not None:
+        expected["sequence_fingerprint"] = sequence_fingerprint(sequences)
+        actual["sequence_fingerprint"] = distribution.sequence_fingerprint
+    mismatches = [
+        f"{key}: expected {expected[key]!r}, got {actual[key]!r}"
+        for key in expected
+        if actual[key] != expected[key]
+    ]
+    if mismatches:
+        raise ValueError(
+            "incompatible Mimosa null distribution: " + "; ".join(mismatches)
+        )
 
 
 def _model(record: Any) -> MotifModel:
@@ -65,7 +114,16 @@ def compare_records(
         raise ValueError(f"unsupported Mimosa metric: {metric}")
     if jobs < 1:
         raise ValueError("comparison jobs must be positive")
+    if search_range < 0:
+        raise ValueError("comparison search_range must be non-negative")
     target_records = list(targets)
+    if null_distribution is not None:
+        validate_null_distribution(
+            null_distribution,
+            metric=metric,
+            search_range=search_range,
+            sequences=sequences,
+        )
     query_model = _model(query)
     query_for_mimosa = _named(query_model, _identity(query, query_model))
     target_models = [
@@ -79,11 +137,19 @@ def compare_records(
         sequences,
         metric=metric,
         search_range=search_range,
+        window_radius=PROFILE_WINDOW_RADIUS,
+        realign_window=PROFILE_REALIGN_WINDOW,
+        min_logerr=PROFILE_MIN_LOGERR,
+        normalization=HybridEmpiricalLogTail(),
         total_threads=jobs,
         inner_threads=1,
     )
     if null_distribution is not None:
-        results = annotate_results(results, null_distribution)
+        results = annotate_results(
+            results,
+            null_distribution,
+            effective_number_of_targets=len(target_records),
+        )
     return [
         MatchedPair(query, target, result)
         for target, result in zip(target_records, results, strict=True)

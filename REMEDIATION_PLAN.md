@@ -133,3 +133,18 @@ git diff --check
 
 Новые зависимости, compatibility wrappers и дополнительные архитектурные слои
 для этих работ не требуются.
+
+## Статус приёмки
+
+- [x] p-value comparison: directory bundle, public `NullDistribution`,
+  compatibility checks, thresholds, and per-query BH correction.
+- [x] MEME boundary: standard output is passed directly to Mimosa; local
+  matrix parsing is removed.
+- [x] strict SiteGA manifest validation and limit-after-validation behavior.
+- [x] ROC/PR/pAUC references, invalid-class errors, stable bootstrap ordering,
+  seeded reproducibility, and `jobs=1`/`jobs=2` parity.
+- [x] fake-process coverage for discovery adapters, command resolution,
+  Jstacs FASTA/JAR handling, and Mimosa reader contracts.
+- [x] migration documentation and packaging checks.
+- [ ] real external-tool smoke tests: implemented as `external`/`fullrun`
+  tests, not run without `HORDEMOTIFS_RUN_FULLRUN=1` and installed tools.

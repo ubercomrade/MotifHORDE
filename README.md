@@ -90,6 +90,9 @@ The external SiteGA process receives `--manifest <path>` and writes a versioned
 JSON manifest. MotifHORDE validates its schema/status, ordered model list,
 relative paths, containment, file existence, `sitega` type, and model length.
 It does not infer model order from filenames.
+The manifest must include `schema_version: 1`, `status`, `message`, and a
+`models` list with `model_file`, `model_type`, `length`, and `name` for every
+entry, including entries beyond the requested motif limit.
 
 ## Python API
 
@@ -109,6 +112,9 @@ MotifHORDE-specific helpers are limited to external discovery adapters,
 evaluation, orchestration, discovery FASTA variants, and combined MEME PFM
 export. There is no `GenericModel`, pickle loader, Tomtom comparator, or
 embedded SiteGA implementation.
+
+See [MIGRATION.md](MIGRATION.md) for removed Python APIs and the 0.2 output,
+null-bundle, MEME, and SiteGA manifest contracts.
 
 ## Development checks
 

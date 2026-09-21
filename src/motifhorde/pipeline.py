@@ -22,6 +22,7 @@ from mimosa import (
 
 from .comparison import (
     MatchedPair,
+    SUPPORTED_METRICS,
     compare_records,
     deduplicate_pairs,
     default_threshold,
@@ -29,6 +30,7 @@ from .comparison import (
     is_similar,
     load_null_distribution,
     sort_pairs,
+    validate_null_distribution,
 )
 from .discovery import MotifDiscoveryTool
 from .evaluation import (
@@ -59,8 +61,14 @@ class DeNovoPipeline:
     ) -> None:
         if comparison_criterion not in {"score", "p-value"}:
             raise ValueError("comparison criterion must be 'score' or 'p-value'")
+        if mimosa_metric not in SUPPORTED_METRICS:
+            raise ValueError(f"unsupported Mimosa metric: {mimosa_metric}")
         if jobs < 1:
             raise ValueError("jobs must be positive")
+        if mimosa_search_range < 0:
+            raise ValueError("mimosa_search_range must be non-negative")
+        if number_of_motifs < 1:
+            raise ValueError("number_of_motifs must be positive")
         if not np.isfinite(fpr_threshold) or not 0 <= fpr_threshold <= 1:
             raise ValueError("fpr_threshold must be finite and lie in [0, 1]")
         if comparison_threshold is not None and not np.isfinite(comparison_threshold):
@@ -81,6 +89,12 @@ class DeNovoPipeline:
         )
         if comparison_criterion == "p-value" and self.null_distribution is None:
             raise ValueError("p-value comparison requires a Mimosa null bundle")
+        if comparison_criterion == "p-value":
+            validate_null_distribution(
+                self.null_distribution,
+                metric=mimosa_metric,
+                search_range=mimosa_search_range,
+            )
         self.fpr_threshold = fpr_threshold
         self.number_of_motifs = number_of_motifs
         self.jobs = jobs

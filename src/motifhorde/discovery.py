@@ -6,7 +6,6 @@ import glob
 import json
 import logging
 import os
-import re
 from abc import ABC, abstractmethod
 from dataclasses import replace
 from pathlib import Path
@@ -26,8 +25,6 @@ from .external import (
 from .io import write_jstacs_fasta
 
 logger = logging.getLogger(__name__)
-
-_MEME_WIDTH_RE = re.compile(r"\bw=\s*(\d+)")
 
 
 class MotifDiscoveryTool(ABC):
@@ -59,6 +56,16 @@ def _require_length(kwargs: dict) -> int:
     return length
 
 
+def _require_number_of_motifs(number_of_motifs: int) -> int:
+    if (
+        isinstance(number_of_motifs, bool)
+        or not isinstance(number_of_motifs, int)
+        or number_of_motifs < 1
+    ):
+        raise ValueError("number_of_motifs must be positive")
+    return number_of_motifs
+
+
 def _check_length(model: MotifModel, expected_length: int | None) -> None:
     if expected_length is not None and model.motif_length != expected_length:
         raise ValueError(
@@ -71,63 +78,6 @@ def _rename(model: MotifModel, prefix: str, index: int) -> MotifModel:
     return replace(model, name=f"{prefix}-{index}")
 
 
-def _meme_matrix_width(header: str) -> int:
-    match = _MEME_WIDTH_RE.search(header)
-    return 0 if match is None else int(match.group(1))
-
-
-def _is_probability_row(line: str) -> bool:
-    parts = line.strip().split()
-    if len(parts) != 4:
-        return False
-    try:
-        [float(part) for part in parts]
-    except ValueError:
-        return False
-    return True
-
-
-def _meme_report_name(line: str) -> str | None:
-    parts = line.strip().split()
-    if len(parts) < 2 or parts[0] != "MOTIF":
-        return None
-    return parts[2] if len(parts) >= 3 and parts[2].startswith("MEME-") else parts[1]
-
-
-def _meme_stdout_for_mimosa(stdout: str) -> str:
-    """Keep only probability matrices from MEME's verbose text report."""
-    lines = stdout.splitlines()
-    motifs: list[tuple[str, str, list[str]]] = []
-    current_name: str | None = None
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        name = _meme_report_name(line)
-        if name is not None:
-            current_name = name
-        elif line.startswith("letter-probability matrix:"):
-            width = _meme_matrix_width(line)
-            rows = lines[index + 1 : index + width + 1]
-            if (
-                current_name is not None
-                and width > 0
-                and len(rows) == width
-                and all(_is_probability_row(row) for row in rows)
-            ):
-                motifs.append(
-                    (current_name, line.strip(), [row.strip() for row in rows])
-                )
-                index += width
-        index += 1
-
-    if not motifs:
-        return stdout
-    normalized = ["MEME version 4", "", "ALPHABET= ACGT", "", "strands: + -", ""]
-    for name, header, rows in motifs:
-        normalized.extend([f"MOTIF {name}", header, *rows, ""])
-    return "\n".join(normalized)
-
-
 def _read_indexed_models(
     path: str,
     model_format: str,
@@ -136,8 +86,7 @@ def _read_indexed_models(
     expected_length: int | None = None,
     **kwargs,
 ) -> list[MotifModel]:
-    if number_of_motifs < 1:
-        raise ValueError("number_of_motifs must be positive")
+    _require_number_of_motifs(number_of_motifs)
     if not os.path.isfile(path) or os.path.getsize(path) == 0:
         raise FileNotFoundError(f"Discovery output is missing or empty: {path}")
 
@@ -212,6 +161,7 @@ def _read_xml_models(
     number_of_motifs: int,
     expected_length: int | None = None,
 ) -> list[MotifModel]:
+    _require_number_of_motifs(number_of_motifs)
     motifs: list[MotifModel] = []
     for path in paths:
         if not os.path.isfile(path) or os.path.getsize(path) == 0:
@@ -235,6 +185,7 @@ class StremeDiscoveryTool(MotifDiscoveryTool):
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
     ):
+        _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         output = _run_streme(
             foreground, background, output_dir, length, number_of_motifs, self.command
@@ -253,7 +204,7 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
         minsites: int | None = None,
         maxsites: int | None = None,
         seed: int | None = None,
-        threads: int | None = None,
+        threads: int | None = 1,
     ) -> None:
         super().__init__("meme")
         self.command = command
@@ -267,6 +218,7 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
     ):
+        _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
         output = os.path.join(output_dir, "motifs.meme")
@@ -287,7 +239,8 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
             "-maxw",
             str(length),
             "-nomatrim",
-            "-text",
+            "-oc",
+            output_dir,
             "-objfun",
             self.objfun,
             "-mod",
@@ -305,15 +258,13 @@ class MemeDiscoveryTool(MotifDiscoveryTool):
                 command.extend([flag, str(value)])
 
         result = run_checked(command)
-        if result.stdout.strip():
-            Path(output).write_text(
-                _meme_stdout_for_mimosa(result.stdout), encoding="utf-8"
-            )
-        else:
-            report = os.path.join(output_dir, "meme.txt")
-            if not os.path.isfile(report) or os.path.getsize(report) == 0:
-                raise RuntimeError("MEME produced no model output")
+        report = os.path.join(output_dir, "meme.txt")
+        if os.path.isfile(report) and os.path.getsize(report) > 0:
             output = report
+        elif result.stdout.strip():
+            Path(output).write_text(result.stdout, encoding="utf-8")
+        else:
+            raise RuntimeError("MEME produced no model output")
         return _read_indexed_models(
             output, "meme", "Meme", number_of_motifs, expected_length=length
         )
@@ -330,6 +281,7 @@ class BammDiscoveryTool(MotifDiscoveryTool):
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
     ):
+        _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         order = int(kwargs.get("order", 2))
         pwm_output = _run_streme(
@@ -486,7 +438,7 @@ class DimontDiscoveryTool(MotifDiscoveryTool):
         jar_path: str | None = None,
         java_command: str = "java",
         java_xmx: str = "4G",
-        threads: int | None = None,
+        threads: int | None = 1,
         position_tag: str = "position",
         value_tag: str = "value",
         bg_order: int = -1,
@@ -509,6 +461,7 @@ class DimontDiscoveryTool(MotifDiscoveryTool):
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
     ):
+        _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
         jar_path = resolve_existing_path(
@@ -555,7 +508,7 @@ class SlimDiscoveryTool(MotifDiscoveryTool):
         jar_path: str | None = None,
         java_command: str = "java",
         java_xmx: str = "4G",
-        threads: int | None = None,
+        threads: int | None = 1,
         position_tag: str = "position",
         value_tag: str = "value",
         bg_order: int = -1,
@@ -578,6 +531,7 @@ class SlimDiscoveryTool(MotifDiscoveryTool):
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
     ):
+        _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         os.makedirs(output_dir, exist_ok=True)
         jar_path = resolve_existing_path(
@@ -625,55 +579,83 @@ def _manifest_model_path(root: Path, value: object) -> Path:
     parts = value.split("/")
     if any(part in ("", ".", "..") for part in parts):
         raise ValueError("SiteGA manifest model_file contains path traversal")
+    for index, _ in enumerate(parts):
+        component = root.joinpath(*parts[: index + 1])
+        if component.is_symlink():
+            raise ValueError("SiteGA manifest model_file contains a symlink")
     candidate = (root / Path(*parts)).resolve()
     try:
         if os.path.commonpath((str(root), str(candidate))) != str(root):
             raise ValueError("SiteGA manifest model_file escapes output directory")
     except ValueError as exc:
         raise ValueError("SiteGA manifest model_file escapes output directory") from exc
-    for index, _ in enumerate(parts):
-        component = root.joinpath(*parts[: index + 1])
-        if component.is_symlink():
-            raise ValueError("SiteGA manifest model_file contains a symlink")
     return candidate
 
 
 def _read_sitega_manifest(
     manifest_path: Path, output_dir: str, expected_length: int, number_of_motifs: int
 ) -> list[MotifModel]:
+    _require_number_of_motifs(number_of_motifs)
     if not manifest_path.is_file():
         raise FileNotFoundError(f"SiteGA manifest is missing: {manifest_path}")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Invalid SiteGA manifest: {manifest_path}") from exc
-    version = manifest.get("schema_version") if isinstance(manifest, dict) else None
-    if isinstance(version, bool) or version != 1:
+    if not isinstance(manifest, dict):
+        raise ValueError("SiteGA manifest must be an object")
+    required = ("schema_version", "status", "message", "models")
+    missing = [key for key in required if key not in manifest]
+    if missing:
+        raise ValueError(
+            "SiteGA manifest is missing required fields: " + ", ".join(missing)
+        )
+    version = manifest["schema_version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
         raise ValueError("SiteGA manifest schema_version must be 1")
-    if manifest.get("status") != "success":
-        raise RuntimeError(f"SiteGA failed: {manifest.get('message', '')}")
-    entries = manifest.get("models")
-    if not isinstance(entries, list) or not entries:
+    status = manifest["status"]
+    message = manifest["message"]
+    if not isinstance(status, str) or not status:
+        raise ValueError("SiteGA manifest status must be a non-empty string")
+    if not isinstance(message, str):
+        raise ValueError("SiteGA manifest message must be a string")
+    entries = manifest["models"]
+    if not isinstance(entries, list):
+        raise ValueError("SiteGA manifest models must be a list")
+    if status == "failure":
+        raise RuntimeError(f"SiteGA failed: {message}")
+    if status != "success":
+        raise ValueError(f"unsupported SiteGA manifest status: {status!r}")
+    if not entries:
         raise ValueError("SiteGA manifest models must be a non-empty list")
 
     root = Path(output_dir).resolve()
     models: list[MotifModel] = []
-    for entry in entries[:number_of_motifs]:
+    for entry in entries:
         if not isinstance(entry, dict):
             raise ValueError("SiteGA manifest model entry must be an object")
-        if entry.get("model_type") != "sitega":
+        required = ("model_file", "model_type", "length", "name")
+        missing = [key for key in required if key not in entry]
+        if missing:
+            raise ValueError(
+                "SiteGA manifest model is missing required fields: "
+                + ", ".join(missing)
+            )
+        if not isinstance(entry["model_type"], str):
+            raise ValueError("SiteGA manifest model_type must be a string")
+        if entry["model_type"] != "sitega":
             raise ValueError("SiteGA manifest model_type must be 'sitega'")
-        length = entry.get("length")
+        length = entry["length"]
         if (
             isinstance(length, bool)
             or not isinstance(length, int)
             or length != expected_length
         ):
             raise ValueError("SiteGA manifest model length is incompatible")
-        name = entry.get("name")
+        name = entry["name"]
         if not isinstance(name, str) or not name:
             raise ValueError("SiteGA manifest model name must be non-empty")
-        path = _manifest_model_path(root, entry.get("model_file"))
+        path = _manifest_model_path(root, entry["model_file"])
         if not path.is_file():
             raise FileNotFoundError(f"SiteGA model is missing: {path}")
         model = read_model(path, format="sitega")
@@ -682,16 +664,17 @@ def _read_sitega_manifest(
                 f"SiteGA model {path} has length {model.motif_length}, expected {expected_length}"
             )
         models.append(replace(model, name=name))
-    if not models:
+    selected = models[:number_of_motifs]
+    if not selected:
         raise RuntimeError("SiteGA manifest contains no requested models")
-    return models
+    return selected
 
 
 class SitegaDiscoveryTool(MotifDiscoveryTool):
     def __init__(
         self,
         command: str | None = None,
-        threads: int | None = None,
+        threads: int | None = 1,
         seed: int | None = None,
     ) -> None:
         super().__init__("sitega")
@@ -702,6 +685,7 @@ class SitegaDiscoveryTool(MotifDiscoveryTool):
     def discover(
         self, foreground, background, output_dir, number_of_motifs, *args, **kwargs
     ):
+        _require_number_of_motifs(number_of_motifs)
         length = _require_length(kwargs)
         lpd = int(kwargs.get("lpd", 6))
         features = int(kwargs.get("features", 20))

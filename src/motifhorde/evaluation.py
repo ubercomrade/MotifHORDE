@@ -87,7 +87,7 @@ def best_scores(model: MotifModel, sequences: EncodedSequences) -> np.ndarray:
 def _roc_curve(labels: np.ndarray, scores: np.ndarray):
     if len(scores) == 0:
         return np.array([0.0]), np.array([0.0]), np.array([np.inf])
-    indexes = np.argsort(scores)[::-1]
+    indexes = np.argsort(-scores, kind="stable")
     sorted_scores = scores[indexes]
     sorted_labels = labels[indexes]
     size = np.unique(scores).size + 1
@@ -118,7 +118,7 @@ def _roc_curve(labels: np.ndarray, scores: np.ndarray):
 def _precision_recall_curve(labels: np.ndarray, scores: np.ndarray):
     if len(scores) == 0:
         return np.array([1.0]), np.array([0.0]), np.array([np.inf])
-    indexes = np.argsort(scores)[::-1]
+    indexes = np.argsort(-scores, kind="stable")
     sorted_scores = scores[indexes]
     sorted_labels = labels[indexes]
     size = np.unique(scores).size + 1

@@ -68,6 +68,7 @@ def test_sitega_manifest_rejects_traversal(tmp_path):
             {
                 "schema_version": 1,
                 "status": "success",
+                "message": "",
                 "models": [
                     {
                         "model_file": "../escape.mat",
@@ -81,4 +82,114 @@ def test_sitega_manifest_rejects_traversal(tmp_path):
     )
 
     with pytest.raises(ValueError, match="traversal"):
+        _read_sitega_manifest(manifest, os.fspath(output), 4, 1)
+
+
+def _write_manifest(path, models, *, status="success", message=""):
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": status,
+                "message": message,
+                "models": models,
+            }
+        )
+    )
+
+
+def _entry(model_file, *, name="Model", model_type="sitega", length=4):
+    return {
+        "model_file": model_file,
+        "model_type": model_type,
+        "length": length,
+        "name": name,
+    }
+
+
+def test_sitega_manifest_validates_entries_before_limit(tmp_path):
+    output = tmp_path / "out"
+    output.mkdir()
+    _sitega_mat(output / "first.mat")
+    manifest = output / "manifest.json"
+    _write_manifest(
+        manifest,
+        [_entry("first.mat"), _entry("../escape.mat")],
+    )
+
+    with pytest.raises(ValueError, match="traversal"):
+        _read_sitega_manifest(manifest, os.fspath(output), 4, 1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 2),
+        ("status", "unknown"),
+        ("message", 1),
+        ("models", {}),
+    ],
+)
+def test_sitega_manifest_rejects_invalid_root_fields(tmp_path, field, value):
+    output = tmp_path / "out"
+    output.mkdir()
+    manifest = output / "manifest.json"
+    data = {
+        "schema_version": 1,
+        "status": "success",
+        "message": "",
+        "models": [],
+    }
+    data[field] = value
+    _write_manifest(
+        manifest, data["models"], status=data["status"], message=data["message"]
+    )
+    raw = json.loads(manifest.read_text())
+    raw["schema_version"] = data["schema_version"]
+    raw["models"] = data["models"]
+    raw[field] = value
+    manifest.write_text(json.dumps(raw))
+
+    with pytest.raises(ValueError):
+        _read_sitega_manifest(manifest, os.fspath(output), 4, 1)
+
+
+def test_sitega_manifest_failure_requires_message(tmp_path):
+    output = tmp_path / "out"
+    output.mkdir()
+    manifest = output / "manifest.json"
+    _write_manifest(manifest, [], status="failure", message="training failed")
+
+    with pytest.raises(RuntimeError, match="training failed"):
+        _read_sitega_manifest(manifest, os.fspath(output), 4, 1)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _entry("missing.mat"),
+        _entry("missing.mat", model_type="pwm"),
+        _entry("missing.mat", length=5),
+    ],
+)
+def test_sitega_manifest_rejects_invalid_model_entries(tmp_path, entry):
+    output = tmp_path / "out"
+    output.mkdir()
+    manifest = output / "manifest.json"
+    _write_manifest(manifest, [entry])
+
+    with pytest.raises((ValueError, FileNotFoundError)):
+        _read_sitega_manifest(manifest, os.fspath(output), 4, 1)
+
+
+def test_sitega_manifest_rejects_symlink(tmp_path):
+    output = tmp_path / "out"
+    output.mkdir()
+    target = tmp_path / "target.mat"
+    _sitega_mat(target)
+    (output / "link.mat").symlink_to(target)
+    manifest = output / "manifest.json"
+    _write_manifest(manifest, [_entry("link.mat")])
+
+    with pytest.raises(ValueError, match="symlink"):
         _read_sitega_manifest(manifest, os.fspath(output), 4, 1)
