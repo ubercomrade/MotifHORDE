@@ -177,9 +177,8 @@ def _read_xml_models(
 
 
 class StremeDiscoveryTool(MotifDiscoveryTool):
-    def __init__(self, nmotifs: int = 5, command: str | None = None) -> None:
+    def __init__(self, command: str | None = None) -> None:
         super().__init__("streme")
-        self.nmotifs = nmotifs
         self.command = command
 
     def discover(
@@ -476,21 +475,20 @@ class DimontDiscoveryTool(MotifDiscoveryTool):
             self.value_tag,
         )
         run_checked(
-            _build_jstacs_args(
+            _build_dimont_args(
                 java,
                 self.java_xmx,
                 jar_path,
                 output_dir,
                 data_name,
-                "dimont",
                 length,
                 self.position_tag,
                 self.value_tag,
                 self.bg_order,
                 self.motif_order,
+                self.ess,
                 self.starts,
                 self.threads,
-                extra=[f"ess={self.ess}"],
             )
         )
         return _read_xml_models(

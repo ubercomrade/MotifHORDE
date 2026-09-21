@@ -237,7 +237,7 @@ def check_dependencies(args: argparse.Namespace) -> None:
 def setup_discovery_tool(args: argparse.Namespace) -> Any:
     threads = 1
     if args.tool == "streme":
-        return StremeDiscoveryTool(args.nmotifs, args.streme_command)
+        return StremeDiscoveryTool(args.streme_command)
     if args.tool == "meme":
         return MemeDiscoveryTool(
             command=args.meme_command,

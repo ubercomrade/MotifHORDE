@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from mimosa import (
 from .comparison import (
     MatchedPair,
     SUPPORTED_METRICS,
+    comparison_value,
     compare_records,
     deduplicate_pairs,
     default_threshold,
@@ -412,8 +414,6 @@ class DeNovoPipeline:
 
 
 def _temporary_discovery_dir(output_dir: str, tool: str):
-    import tempfile
-
     return tempfile.TemporaryDirectory(
         prefix="full_", dir=os.path.join(output_dir, tool)
     )
@@ -501,8 +501,6 @@ def _select_nonredundant_motifs(
 
 
 def _candidate_value(first: MatchedPair, second: MatchedPair, criterion: str) -> float:
-    from .comparison import comparison_value
-
     return (
         comparison_value(first, criterion) + comparison_value(second, criterion)
     ) / 2.0
