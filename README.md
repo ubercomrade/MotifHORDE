@@ -79,7 +79,9 @@ motifs/
 Every model is a Mimosa portable directory bundle. `statistics.json` contains
 `schema_version`, `tool`, and an ordered `motifs` list. Bootstrap entries have
 `id`, `model`, `name`, `split`, `params`, and `metrics`; final entries have
-`rank`, `model`, `name`, `params`, and `metrics`.
+`rank`, `model`, `name`, `params`, and `metrics`. The combined
+`all_motifs_in_pfm_form.meme` export reports the real per-motif site count
+(`nsites`) reconstructed from the promoters instead of a placeholder.
 
 Existing result bundles are never overwritten. Regenerate old pickle/joblib
 outputs from discovery inputs or interoperable MEME data.
