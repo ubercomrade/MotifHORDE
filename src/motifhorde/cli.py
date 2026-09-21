@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-from typing import Any
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from .comparison import default_threshold
 from .discovery import (
     BammDiscoveryTool,
     DimontDiscoveryTool,
     MemeDiscoveryTool,
+    MotifDiscoveryTool,
     SitegaDiscoveryTool,
     SlimDiscoveryTool,
     StremeDiscoveryTool,
@@ -129,7 +131,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_jobs(jobs: int) -> int:
-    return os.cpu_count() or 1 if jobs == -1 else jobs
+    return (os.cpu_count() or 1) if jobs == -1 else jobs
 
 
 def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -153,132 +155,161 @@ def _command_exists(command: str) -> bool:
     return os.path.isfile(command) or shutil.which(command) is not None
 
 
-def _dependency_error(message: str) -> None:
-    raise RuntimeError(message)
+@dataclass(frozen=True)
+class CommandRequirement:
+    """An executable a discovery tool resolves from CLI/env/PATH."""
+
+    label: str
+    default: str
+    cli_attr: str
+    env_var: str | None
+
+
+@dataclass(frozen=True)
+class JarRequirement:
+    """A JAR file a discovery tool resolves from CLI or an env variable."""
+
+    label: str
+    cli_attr: str
+    env_var: str
+
+
+TOOL_COMMANDS: dict[str, tuple[CommandRequirement, ...]] = {
+    "streme": (
+        CommandRequirement(
+            "STREME",
+            DEFAULT_STREME_COMMAND,
+            "streme_command",
+            "HORDEMOTIFS_STREME_COMMAND",
+        ),
+    ),
+    "meme": (
+        CommandRequirement(
+            "MEME", DEFAULT_MEME_COMMAND, "meme_command", "HORDEMOTIFS_MEME_COMMAND"
+        ),
+    ),
+    "bamm": (
+        CommandRequirement(
+            "STREME",
+            DEFAULT_STREME_COMMAND,
+            "streme_command",
+            "HORDEMOTIFS_STREME_COMMAND",
+        ),
+        CommandRequirement(
+            "BaMMmotif",
+            DEFAULT_BAMM_COMMAND,
+            "bamm_command",
+            "HORDEMOTIFS_BAMM_COMMAND",
+        ),
+    ),
+    "sitega": (
+        CommandRequirement(
+            "SiteGA",
+            DEFAULT_SITEGA_COMMAND,
+            "sitega_command",
+            "HORDEMOTIFS_SITEGA_COMMAND",
+        ),
+    ),
+    "dimont": (CommandRequirement("Java", "java", "java_command", None),),
+    "slim": (CommandRequirement("Java", "java", "java_command", None),),
+}
+
+TOOL_JARS: dict[str, tuple[JarRequirement, ...]] = {
+    "dimont": (JarRequirement("Dimont jar", "dimont_jar", "HORDEMOTIFS_DIMONT_JAR"),),
+    "slim": (JarRequirement("SlimDimont jar", "slim_jar", "HORDEMOTIFS_SLIM_JAR"),),
+}
 
 
 def check_dependencies(args: argparse.Namespace) -> None:
-    checks = []
-    if args.tool == "streme":
-        checks.append(
-            (
-                resolve_command(
-                    DEFAULT_STREME_COMMAND,
-                    explicit=args.streme_command,
-                    env_var="HORDEMOTIFS_STREME_COMMAND",
-                ),
-                "STREME",
-            )
+    for requirement in TOOL_COMMANDS.get(args.tool, ()):
+        command = resolve_command(
+            requirement.default,
+            explicit=getattr(args, requirement.cli_attr),
+            env_var=requirement.env_var,
         )
-    elif args.tool == "meme":
-        checks.append(
-            (
-                resolve_command(
-                    DEFAULT_MEME_COMMAND,
-                    explicit=args.meme_command,
-                    env_var="HORDEMOTIFS_MEME_COMMAND",
-                ),
-                "MEME",
-            )
-        )
-    elif args.tool == "bamm":
-        checks.extend(
-            [
-                (
-                    resolve_command(
-                        DEFAULT_STREME_COMMAND,
-                        explicit=args.streme_command,
-                        env_var="HORDEMOTIFS_STREME_COMMAND",
-                    ),
-                    "STREME",
-                ),
-                (
-                    resolve_command(
-                        DEFAULT_BAMM_COMMAND,
-                        explicit=args.bamm_command,
-                        env_var="HORDEMOTIFS_BAMM_COMMAND",
-                    ),
-                    "BaMMmotif",
-                ),
-            ]
-        )
-    elif args.tool == "sitega":
-        checks.append(
-            (
-                resolve_command(
-                    DEFAULT_SITEGA_COMMAND,
-                    explicit=args.sitega_command,
-                    env_var="HORDEMOTIFS_SITEGA_COMMAND",
-                ),
-                "SiteGA",
-            )
-        )
-    elif args.tool == "dimont":
-        checks.append((resolve_command(args.java_command), "Java"))
-        try:
-            resolve_existing_path(
-                args.dimont_jar, "HORDEMOTIFS_DIMONT_JAR", "Dimont jar"
-            )
-        except FileNotFoundError as exc:
-            _dependency_error(str(exc))
-    elif args.tool == "slim":
-        checks.append((resolve_command(args.java_command), "Java"))
-        try:
-            resolve_existing_path(
-                args.slim_jar, "HORDEMOTIFS_SLIM_JAR", "SlimDimont jar"
-            )
-        except FileNotFoundError as exc:
-            _dependency_error(str(exc))
-    for command, label in checks:
         if not _command_exists(command):
-            _dependency_error(f"{label} dependency missing: {command}")
+            raise RuntimeError(f"{requirement.label} dependency missing: {command}")
+    for requirement in TOOL_JARS.get(args.tool, ()):
+        try:
+            resolve_existing_path(
+                getattr(args, requirement.cli_attr),
+                requirement.env_var,
+                requirement.label,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(str(exc)) from exc
 
 
-def setup_discovery_tool(args: argparse.Namespace) -> Any:
-    threads = 1
-    if args.tool == "streme":
-        return StremeDiscoveryTool(args.streme_command)
-    if args.tool == "meme":
-        return MemeDiscoveryTool(
-            command=args.meme_command,
-            objfun=args.meme_objfun,
-            model=args.meme_mod,
-            minsites=args.meme_minsites,
-            maxsites=args.meme_maxsites,
-            seed=args.meme_seed,
-            threads=threads,
-        )
-    if args.tool == "bamm":
-        return BammDiscoveryTool(args.bamm_command, args.streme_command)
-    if args.tool == "dimont":
-        return DimontDiscoveryTool(
-            jar_path=args.dimont_jar,
-            java_command=args.java_command,
-            java_xmx=args.java_xmx,
-            threads=threads,
-            position_tag=args.jstacs_position_tag,
-            value_tag=args.jstacs_value_tag,
-            bg_order=args.jstacs_bg_order,
-            motif_order=args.dimont_motif_order,
-            ess=args.dimont_ess,
-            starts=args.dimont_starts,
-        )
-    if args.tool == "slim":
-        return SlimDiscoveryTool(
-            jar_path=args.slim_jar,
-            java_command=args.java_command,
-            java_xmx=args.java_xmx,
-            threads=threads,
-            position_tag=args.jstacs_position_tag,
-            value_tag=args.jstacs_value_tag,
-            bg_order=args.jstacs_bg_order,
-            motif_order=args.slim_motif_order,
-            modify=args.slim_modify,
-            starts=args.slim_starts,
-        )
-    if args.tool == "sitega":
-        return SitegaDiscoveryTool(args.sitega_command, threads, args.seed)
-    raise ValueError(f"unknown discovery tool: {args.tool}")
+def _build_streme(args: argparse.Namespace) -> MotifDiscoveryTool:
+    return StremeDiscoveryTool(args.streme_command)
+
+
+def _build_meme(args: argparse.Namespace) -> MotifDiscoveryTool:
+    return MemeDiscoveryTool(
+        command=args.meme_command,
+        objfun=args.meme_objfun,
+        model=args.meme_mod,
+        minsites=args.meme_minsites,
+        maxsites=args.meme_maxsites,
+        seed=args.meme_seed,
+        threads=1,
+    )
+
+
+def _build_bamm(args: argparse.Namespace) -> MotifDiscoveryTool:
+    return BammDiscoveryTool(args.bamm_command, args.streme_command)
+
+
+def _build_dimont(args: argparse.Namespace) -> MotifDiscoveryTool:
+    return DimontDiscoveryTool(
+        jar_path=args.dimont_jar,
+        java_command=args.java_command,
+        java_xmx=args.java_xmx,
+        threads=1,
+        position_tag=args.jstacs_position_tag,
+        value_tag=args.jstacs_value_tag,
+        bg_order=args.jstacs_bg_order,
+        motif_order=args.dimont_motif_order,
+        ess=args.dimont_ess,
+        starts=args.dimont_starts,
+    )
+
+
+def _build_slim(args: argparse.Namespace) -> MotifDiscoveryTool:
+    return SlimDiscoveryTool(
+        jar_path=args.slim_jar,
+        java_command=args.java_command,
+        java_xmx=args.java_xmx,
+        threads=1,
+        position_tag=args.jstacs_position_tag,
+        value_tag=args.jstacs_value_tag,
+        bg_order=args.jstacs_bg_order,
+        motif_order=args.slim_motif_order,
+        modify=args.slim_modify,
+        starts=args.slim_starts,
+    )
+
+
+def _build_sitega(args: argparse.Namespace) -> MotifDiscoveryTool:
+    return SitegaDiscoveryTool(args.sitega_command, 1, args.seed)
+
+
+TOOL_BUILDERS: dict[str, Callable[[argparse.Namespace], MotifDiscoveryTool]] = {
+    "streme": _build_streme,
+    "meme": _build_meme,
+    "bamm": _build_bamm,
+    "dimont": _build_dimont,
+    "slim": _build_slim,
+    "sitega": _build_sitega,
+}
+
+
+def setup_discovery_tool(args: argparse.Namespace) -> MotifDiscoveryTool:
+    try:
+        builder = TOOL_BUILDERS[args.tool]
+    except KeyError:
+        raise ValueError(f"unknown discovery tool: {args.tool}") from None
+    return builder(args)
 
 
 def setup_discovery_params(args: argparse.Namespace) -> dict[str, list[int]]:
