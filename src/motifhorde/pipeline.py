@@ -373,7 +373,10 @@ class DeNovoPipeline:
         pfms = [_ensure_pfm(record.model, promoters) for record in ordered]
         write_meme(
             pfms,
-            [(record.name, record.model.motif_length) for record in ordered],
+            [
+                (record.name, record.model.motif_length, _pfm_nsites(pfm))
+                for record, pfm in zip(ordered, pfms, strict=True)
+            ],
             meme_path,
         )
         entries = []
@@ -423,6 +426,11 @@ def _ensure_pfm(model: MotifModel, sequences: EncodedSequences):
         TopFractionHits(0.10, BestPerSequence()),
         strands="best",
     )
+
+
+def _pfm_nsites(pfm: np.ndarray) -> int:
+    """Site count of a PFM rebuilt with at most one hit per sequence."""
+    return int(round(float(pfm.sum(axis=0).max())))
 
 
 def _safe_name(name: str) -> str:

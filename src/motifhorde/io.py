@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 from mimosa import EncodedSequences, read_fasta
@@ -55,10 +54,16 @@ def write_jstacs_fasta(
 
 
 def write_meme(
-    motifs: Sequence[np.ndarray], info: Sequence[Any], path: str | Path
+    motifs: Sequence[np.ndarray],
+    records: Sequence[tuple[str, int, int]],
+    path: str | Path,
 ) -> None:
-    """Write PFMs to a minimal MEME formatted file."""
-    if len(motifs) != len(info):
+    """Write PFMs to a minimal MEME formatted file.
+
+    Each record is ``(name, length, nsites)``; nsites must match every
+    PFM column sum, otherwise the reconstructed site counts diverged.
+    """
+    if len(motifs) != len(records):
         raise ValueError("MEME motif metadata count must match motif count")
 
     with open(path, "w", encoding="ascii") as handle:
@@ -68,16 +73,21 @@ def write_meme(
         handle.write("Background letter frequencies\n")
         handle.write("A 0.25 C 0.25 G 0.25 T 0.25\n\n")
 
-        for pfm, entry in zip(motifs, info, strict=True):
-            name, length = entry
+        for pfm, entry in zip(motifs, records, strict=True):
+            name, length, nsites = entry
             matrix = np.asarray(pfm, dtype=np.float32)
             if matrix.shape != (4, int(length)):
                 raise ValueError(f"PFM for {name} must have shape (4, length)")
             if not np.all(np.isfinite(matrix)):
                 raise ValueError(f"PFM for {name} contains non-finite values")
+            if not np.allclose(matrix.sum(axis=0), nsites):
+                raise ValueError(
+                    f"PFM for {name} column sums must all equal nsites={nsites}"
+                )
             handle.write(f"MOTIF {name}\n")
             handle.write(
-                f"letter-probability matrix: alength= 4 w= {int(length)} nsites= 20 E= 0\n"
+                f"letter-probability matrix: alength= 4 w= {int(length)} "
+                f"nsites= {int(nsites)} E= 0\n"
             )
             np.savetxt(handle, matrix.T, fmt=" %.6f")
             handle.write("\n")

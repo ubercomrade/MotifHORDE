@@ -583,10 +583,12 @@ def _manifest_model_path(root: Path, value: object) -> Path:
             raise ValueError("SiteGA manifest model_file contains a symlink")
     candidate = (root / Path(*parts)).resolve()
     try:
-        if os.path.commonpath((str(root), str(candidate))) != str(root):
-            raise ValueError("SiteGA manifest model_file escapes output directory")
+        common = os.path.commonpath((str(root), str(candidate)))
     except ValueError as exc:
+        # commonpath raises on mixed absolute/relative or different drives.
         raise ValueError("SiteGA manifest model_file escapes output directory") from exc
+    if common != str(root):
+        raise ValueError("SiteGA manifest model_file escapes output directory")
     return candidate
 
 

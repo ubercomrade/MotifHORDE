@@ -55,7 +55,7 @@ def run_checked(args: list[str], cwd: str | None = None) -> subprocess.Completed
         )
     except OSError as exc:
         raise RuntimeError(
-            f"Command failed to start: {shlex.join(args)}\nstdout:\n\nstderr:\n{exc}"
+            f"Command failed to start: {shlex.join(args)}\nerror: {exc}"
         ) from exc
     if result.returncode != 0:
         raise RuntimeError(
