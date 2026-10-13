@@ -1,13 +1,13 @@
 [project]
 name = "motifhorde"
-version = "0.2.0"
+version = "0.3.0"
 description = "Motif Harmonized Orchestration for Robust Discovery and Evaluation"
 authors = [{name = "Anton Tsukanov", email = "tsukanov@bionet.nsc.ru"}]
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "numpy>=2.4.6,<3",
-    "mimosa-tool>=1.4.6,<1.5"
+    "mimosa-tool>=2.0.0,<2.1"
 ]
 
 [dependency-groups]

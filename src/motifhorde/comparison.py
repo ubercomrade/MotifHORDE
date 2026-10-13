@@ -7,6 +7,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
 from mimosa import (
     EncodedSequences,
     HybridEmpiricalLogTail,
@@ -18,12 +19,14 @@ from mimosa import (
 )
 from mimosa.io import read_null_bundle, sequence_fingerprint
 
-SUPPORTED_METRICS = ("co", "dice", "cosine")
+PROFILE_METRIC = "jaccard"
+PROFILE_ALIGNMENT_VERSION = "circular-jaccard-v1"
 DEFAULT_SCORE_COMPARISON_THRESHOLD = 0.9
 DEFAULT_PVALUE_COMPARISON_THRESHOLD = 0.05
-PROFILE_WINDOW_RADIUS = 10
-PROFILE_REALIGN_WINDOW = 3
-PROFILE_MIN_LOGERR = 0.0
+PROFILE_MIN_LOGERR = 4.0
+COMPARISON_SEQUENCE_COUNT = 10_000
+COMPARISON_SEQUENCE_LENGTH = 100
+COMPARISON_SEQUENCE_SEED = 127
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +47,6 @@ class MatchedPair:
 class ComparisonSettings:
     """Validated Mimosa comparison parameters shared by all pipeline stages."""
 
-    metric: str
     criterion: str
     threshold: float
     null_distribution: NullDistribution | None = None
@@ -52,8 +54,6 @@ class ComparisonSettings:
     jobs: int = 1
 
     def __post_init__(self) -> None:
-        if self.metric not in SUPPORTED_METRICS:
-            raise ValueError(f"unsupported Mimosa metric: {self.metric}")
         if self.criterion not in {"score", "p-value"}:
             raise ValueError("comparison criterion must be 'score' or 'p-value'")
         if self.jobs < 1:
@@ -72,11 +72,27 @@ class ComparisonSettings:
             query,
             targets,
             sequences,
-            metric=self.metric,
             jobs=self.jobs,
             null_distribution=self.null_distribution,
             search_range=self.search_range,
         )
+
+
+def comparison_sequences() -> EncodedSequences:
+    """Return the fixed random sequences that all motif comparisons run on.
+
+    The set is deterministic and independent of the input data, so one null
+    bundle built on it (``mimosa.build_null(..., sequences=comparison_sequences())``)
+    fits every run.
+    """
+    rng = np.random.default_rng(COMPARISON_SEQUENCE_SEED)
+    codes = rng.integers(
+        0,
+        4,
+        size=(COMPARISON_SEQUENCE_COUNT, COMPARISON_SEQUENCE_LENGTH),
+        dtype=np.uint8,
+    )
+    return EncodedSequences.from_rows(codes)
 
 
 def load_null_distribution(path: str | Path) -> NullDistribution:
@@ -89,7 +105,6 @@ def load_null_distribution(path: str | Path) -> NullDistribution:
 def validate_null_distribution(
     distribution: NullDistribution,
     *,
-    metric: str,
     search_range: int,
     sequences=None,
 ) -> None:
@@ -99,10 +114,9 @@ def validate_null_distribution(
     contract = distribution.contract
     expected_normalization = normalization_fingerprint(HybridEmpiricalLogTail())
     expected = {
-        "metric": metric,
+        "metric": PROFILE_METRIC,
         "search_range": search_range,
-        "window_radius": PROFILE_WINDOW_RADIUS,
-        "realign_window": PROFILE_REALIGN_WINDOW,
+        "alignment_version": PROFILE_ALIGNMENT_VERSION,
         "min_logerr": PROFILE_MIN_LOGERR,
         "normalization_version": expected_normalization,
         "background_fingerprint": "none",
@@ -110,8 +124,7 @@ def validate_null_distribution(
     actual = {
         "metric": distribution.metric,
         "search_range": contract["search_range"],
-        "window_radius": contract["window_radius"],
-        "realign_window": contract["realign_window"],
+        "alignment_version": contract["alignment_version"],
         "min_logerr": float(contract["min_logerr"]),
         "normalization_version": contract["normalization_version"],
         "background_fingerprint": distribution.background_fingerprint,
@@ -150,7 +163,6 @@ def compare_records(
     targets: Iterable[Any],
     sequences: EncodedSequences,
     *,
-    metric: str,
     jobs: int,
     null_distribution: NullDistribution | None = None,
     search_range: int = 10,
@@ -160,8 +172,6 @@ def compare_records(
     The null distribution is used as given: callers passing a foreign
     bundle must validate it with validate_null_distribution themselves.
     """
-    if metric not in SUPPORTED_METRICS:
-        raise ValueError(f"unsupported Mimosa metric: {metric}")
     if jobs < 1:
         raise ValueError("comparison jobs must be positive")
     if search_range < 0:
@@ -178,10 +188,7 @@ def compare_records(
         query_for_mimosa,
         target_models,
         sequences,
-        metric=metric,
         search_range=search_range,
-        window_radius=PROFILE_WINDOW_RADIUS,
-        realign_window=PROFILE_REALIGN_WINDOW,
         min_logerr=PROFILE_MIN_LOGERR,
         normalization=HybridEmpiricalLogTail(),
         total_threads=jobs,

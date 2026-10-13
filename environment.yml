@@ -9,5 +9,5 @@ dependencies:
   - conda-forge::openmp
   - pip
   - pip:
-      - mimosa-tool>=1.4.6,<1.5
+      - mimosa-tool>=2.0.0,<2.1
       - motifhorde

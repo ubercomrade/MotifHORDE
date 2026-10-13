@@ -27,6 +27,7 @@ from mimosa import (
 from .comparison import (
     ComparisonSettings,
     MatchedPair,
+    comparison_sequences,
     comparison_value,
     default_threshold,
     deduplicate_pairs,
@@ -75,7 +76,6 @@ class DeNovoPipeline:
         self,
         discovery_tool: MotifDiscoveryTool,
         evaluator: PerformanceEvaluator,
-        mimosa_metric: str = "co",
         comparison_criterion: str = "score",
         comparison_threshold: float | None = None,
         null_distribution: NullDistribution | str | os.PathLike | None = None,
@@ -95,7 +95,6 @@ class DeNovoPipeline:
             else null_distribution
         )
         self.comparison = ComparisonSettings(
-            metric=mimosa_metric,
             criterion=comparison_criterion,
             threshold=(
                 default_threshold(comparison_criterion)
@@ -109,8 +108,8 @@ class DeNovoPipeline:
         if comparison_criterion == "p-value":
             validate_null_distribution(
                 null,
-                metric=mimosa_metric,
                 search_range=mimosa_search_range,
+                sequences=comparison_sequences(),
             )
         self.discovery_tool = discovery_tool
         self.evaluator = evaluator
@@ -133,13 +132,7 @@ class DeNovoPipeline:
         peaks, peak_names = self._read_sequences(foreground_path)
         background, background_names = self._read_sequences(background_path)
         promoters, _ = self._read_sequences(promoters_path)
-        if self.comparison.null_distribution is not None:
-            validate_null_distribution(
-                self.comparison.null_distribution,
-                metric=self.comparison.metric,
-                search_range=self.comparison.search_range,
-                sequences=peaks,
-            )
+        profile_sequences = comparison_sequences()
 
         records = Bootstrapper(
             self.discovery_tool,
@@ -158,11 +151,11 @@ class DeNovoPipeline:
         )
         self._save_bootstrap(records, paths["bootstrap"])
         match_groups = self._compare_bootstrap_motifs(
-            records, discovery_params, peaks, metric
+            records, discovery_params, profile_sequences, metric
         )
         final_motifs = self._select_final_motifs(
             match_groups,
-            peaks,
+            profile_sequences,
             promoters,
             foreground_path,
             background_path,
@@ -171,7 +164,7 @@ class DeNovoPipeline:
         )
         final_motifs = _select_nonredundant(
             [(motif.model, motif.metrics[metric], motif) for motif in final_motifs],
-            peaks,
+            profile_sequences,
             self.comparison,
         )
         self._save_results(final_motifs, paths["motifs"], promoters, metric)
@@ -237,7 +230,7 @@ class DeNovoPipeline:
         self,
         records: list[EvaluatedMotif],
         discovery_params: dict[str, Iterable[Any]],
-        peaks: EncodedSequences,
+        sequences: EncodedSequences,
         metric: str,
     ) -> list[dict[str, Any]]:
         groups: list[dict[str, Any]] = []
@@ -257,7 +250,7 @@ class DeNovoPipeline:
                             (record.model, record.metrics.get(metric, 0.0), record)
                             for record in split_records
                         ],
-                        peaks,
+                        sequences,
                         self.comparison,
                     )
                 )
@@ -266,7 +259,7 @@ class DeNovoPipeline:
             odd, even = splits
             pairs: list[MatchedPair] = []
             for query in odd:
-                pairs.extend(self.comparison.compare(query, even, peaks))
+                pairs.extend(self.comparison.compare(query, even, sequences))
             pairs = deduplicate_pairs(
                 sort_pairs(
                     filter_similar(
@@ -284,7 +277,7 @@ class DeNovoPipeline:
     def _select_final_motifs(
         self,
         match_groups: list[dict[str, Any]],
-        peaks: EncodedSequences,
+        sequences: EncodedSequences,
         promoters: EncodedSequences,
         foreground_path: str,
         background_path: str,
@@ -317,8 +310,8 @@ class DeNovoPipeline:
                 for index, model in enumerate(full_motifs):
                     if index in assigned:
                         continue
-                    odd = self.comparison.compare(model, [pair.query], peaks)[0]
-                    even = self.comparison.compare(model, [pair.target], peaks)[0]
+                    odd = self.comparison.compare(model, [pair.query], sequences)[0]
+                    even = self.comparison.compare(model, [pair.target], sequences)[0]
                     if is_similar(odd, criterion, threshold) and is_similar(
                         even, criterion, threshold
                     ):

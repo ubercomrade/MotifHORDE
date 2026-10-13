@@ -6,10 +6,10 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
-from mimosa import EncodedSequences, build_null, read_model
+from mimosa import PWM, EncodedSequences, build_null, read_model
 from mimosa.io import write_null_bundle
 
-from motifhorde.comparison import ComparisonSettings
+from motifhorde.comparison import ComparisonSettings, comparison_sequences
 from motifhorde.discovery import MotifDiscoveryTool
 from motifhorde.evaluation import EvaluatedMotif, PerformanceEvaluator
 from motifhorde.pipeline import DeNovoPipeline, _select_nonredundant
@@ -29,13 +29,27 @@ class FakeDiscovery(MotifDiscoveryTool):
         ]
 
 
-def test_select_nonredundant_keeps_best_of_similar_motifs(pwm_model):
-    # Profile windows need sequences wider than the window radius, otherwise
-    # Mimosa reports no sites and every score collapses to zero.
+def _sequences_with_rare_sites(site: str) -> tuple[PWM, EncodedSequences]:
+    # Mimosa keeps only positions with -log10(ERR) >= 4, and ERR is empirical
+    # on the compared sequences: a site must be rarer than 1 in 10,000
+    # positions, otherwise no sites remain and every score collapses to zero.
+    weights = np.full((5, len(site)), -2.0, dtype=np.float32)
+    weights[4] = -3.0
+    for position, base in enumerate(site):
+        weights["ACGT".index(base), position] = 3.0
     rng = np.random.default_rng(5)
-    long_sequences = EncodedSequences.from_strings(
-        ["".join(rng.choice(list("ACGT"), 60)) for _ in range(8)]
-    )
+    rows = []
+    for index in range(400):
+        row = list(rng.choice(list("ACGT"), 200))
+        if index < 4:
+            start = int(rng.integers(0, 200 - len(site)))
+            row[start : start + len(site)] = site
+        rows.append("".join(row))
+    return PWM("Strong", weights, (0.25,) * 4), EncodedSequences.from_strings(rows)
+
+
+def test_select_nonredundant_keeps_best_of_similar_motifs():
+    pwm_model, long_sequences = _sequences_with_rare_sites("ACGTTGCA")
     worse = EvaluatedMotif(
         replace(pwm_model, name="Similar"),
         "worse",
@@ -45,7 +59,7 @@ def test_select_nonredundant_keeps_best_of_similar_motifs(pwm_model):
         {"pauROC": 0.4},
     )
     best = EvaluatedMotif(pwm_model, "best", "task_0001", "odd", {}, {"pauROC": 0.9})
-    settings = ComparisonSettings(metric="co", criterion="score", threshold=0.9)
+    settings = ComparisonSettings(criterion="score", threshold=0.9)
 
     kept = _select_nonredundant(
         [
@@ -77,7 +91,6 @@ def test_pipeline_writes_versioned_bundles_and_refuses_overwrite(tmp_path, pwm_m
     pipeline = DeNovoPipeline(
         FakeDiscovery(pwm_model),
         PerformanceEvaluator("peaks"),
-        mimosa_metric="co",
         comparison_threshold=-1,
         number_of_motifs=1,
     )
@@ -126,7 +139,6 @@ def test_pipeline_seed_and_order_are_independent_of_jobs(tmp_path, pwm_model):
         DeNovoPipeline(
             FakeDiscovery(pwm_model),
             PerformanceEvaluator("peaks"),
-            mimosa_metric="co",
             comparison_threshold=-1,
             number_of_motifs=1,
             jobs=jobs,
@@ -159,20 +171,22 @@ def test_pipeline_accepts_mimosa_pvalue_bundle(tmp_path, pwm_model):
     for path in (foreground, background, promoters):
         path.write_text(fasta)
 
-    sequences = EncodedSequences.from_strings(
-        ["ACGTACGTACGT", "TACGTACGTACG", "ACGTACGTACGT", "TACGTACGTACG"]
-    )
     other = replace(pwm_model, name="Other")
     null_path = tmp_path / "null"
     write_null_bundle(
         null_path,
-        build_null([pwm_model, other], sequences=sequences, n_samples=8, seed=13),
+        build_null(
+            [pwm_model, other],
+            sequences=comparison_sequences(),
+            n_samples=8,
+            seed=13,
+            search_range=10,
+        ),
     )
 
     DeNovoPipeline(
         FakeDiscovery(pwm_model),
         PerformanceEvaluator("peaks"),
-        mimosa_metric="co",
         comparison_criterion="p-value",
         comparison_threshold=1.0,
         null_distribution=os.fspath(null_path),

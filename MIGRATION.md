@@ -1,3 +1,26 @@
+# Migration to MotifHORDE 0.3
+
+MotifHORDE 0.3 is built on Mimosa 2.0 (`mimosa-tool>=2.0.0,<2.1`).
+
+- Mimosa 2.0 has a single profile metric, weighted Jaccard. `--mimosa-metric`
+  (`co`, `dice`, `cosine`) and the `mimosa_metric` argument of `DeNovoPipeline`
+  and `ComparisonSettings` are removed; `compare_records` and
+  `validate_null_distribution` no longer take `metric`.
+- Motif comparison runs on a fixed, seeded set of 10,000 random sequences of
+  length 100 (`comparison_sequences()`) instead of the foreground peaks. Scores
+  no longer depend on the input data.
+- Comparison scores are not comparable with 1.4 scores. Profiles keep only
+  positions with `-log10(ERR) >= 4` (`min_logerr=4`, previously 0), and ERR is
+  empirical on the compared sequences. Re-check `--comparison-threshold` (default still 0.9).
+- Null bundles written by Mimosa 1.4 (format 9) are not compatible. Rebuild
+  them with `mimosa.build_null` using `search_range` equal to
+  `--mimosa-search-range`, `min_logerr=4`, and
+  `sequences=comparison_sequences()`. The
+  bundle contract is checked for metric `jaccard`, `alignment_version`,
+  `search_range`, `min_logerr`, normalization, sequences, and background. The
+  pipeline validates it once, in `DeNovoPipeline.__init__`.
+- Model bundles (format 2) are unchanged and remain readable.
+
 # Migration to MotifHORDE 0.2
 
 MotifHORDE 0.2 is a breaking release built on Mimosa 1.4.

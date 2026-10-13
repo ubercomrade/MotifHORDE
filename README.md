@@ -6,7 +6,7 @@ validation, Mimosa profile comparison, and portable result export.
 ## Requirements
 
 - Python `>=3.12,<3.14`;
-- `mimosa-tool>=1.4.6,<1.5`;
+- `mimosa-tool>=2.0.0,<2.1`;
 - external discovery programs on `PATH` or supplied explicitly.
 
 The conda-first environment includes MEME Suite and `bammmotif2`:
@@ -34,12 +34,18 @@ For example:
 ```bash
 motifhorde peaks.fa background.fa promoters.fa output/ \
   --tool streme --length 8-20-4 --nmotifs 5 \
-  --mimosa-metric cosine --jobs 4 --seed 42
+  --jobs 4 --seed 42
 ```
 
-Only Mimosa profile metrics `co`, `dice`, and `cosine` are supported. Use
+Motifs are compared with Mimosa's profile comparison (weighted Jaccard over
+`-log10(ERR)` profiles, `min_logerr=4`); there is no metric option. All
+comparisons run on a fixed set of 10,000 random sequences of length 100
+(`motifhorde.comparison.comparison_sequences()`), not on the input FASTA files. Use
 `--comparison-criterion p-value` with a Mimosa null-distribution directory
-bundle passed to `--mimosa-null-distribution`.
+bundle passed to `--mimosa-null-distribution`. The bundle must be built with
+the same `search_range` as `--mimosa-search-range` (default 10, Mimosa's own
+default is 5), `min_logerr=4`, the default `HybridEmpiricalLogTail`
+normalization and `sequences=comparison_sequences()`.
 
 SiteGA uses `--lpd` for the maximum LPD distance (`1..6`) and `--features` for
 the feature-count grid:

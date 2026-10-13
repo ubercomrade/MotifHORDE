@@ -113,9 +113,6 @@ def create_arg_parser() -> argparse.ArgumentParser:
 
     comparison = parser.add_argument_group("Mimosa profile comparison")
     comparison.add_argument(
-        "--mimosa-metric", choices=["co", "dice", "cosine"], default="co"
-    )
-    comparison.add_argument(
         "--comparison-criterion", choices=["score", "p-value"], default="score"
     )
     comparison.add_argument("--comparison-threshold", type=float)
@@ -332,13 +329,11 @@ def main_cli(argv: list[str] | None = None) -> None:
     if args.verbose:
         print(f"Discovery tool: {args.tool}")
         print(f"Discovery parameters: {discovery_params}")
-        print(f"Mimosa metric: {args.mimosa_metric}")
         print(f"Jobs: {_resolve_jobs(args.jobs)}")
 
     pipeline = DeNovoPipeline(
         discovery_tool=setup_discovery_tool(args),
         evaluator=setup_evaluator(args),
-        mimosa_metric=args.mimosa_metric,
         comparison_criterion=args.comparison_criterion,
         comparison_threshold=args.comparison_threshold,
         null_distribution=args.mimosa_null_distribution,
