@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, TypeVar
@@ -23,6 +23,7 @@ from mimosa import (
     reconstruct_pfm,
     write_model,
 )
+from mimosa.cache import Cache
 
 from .comparison import (
     ComparisonSettings,
@@ -105,12 +106,8 @@ class DeNovoPipeline:
             search_range=mimosa_search_range,
             jobs=jobs,
         )
-        if comparison_criterion == "p-value":
-            validate_null_distribution(
-                null,
-                search_range=mimosa_search_range,
-                sequences=comparison_sequences(),
-            )
+        if null is not None:
+            validate_null_distribution(null, search_range=mimosa_search_range)
         self.discovery_tool = discovery_tool
         self.evaluator = evaluator
         self.fpr_threshold = fpr_threshold
@@ -150,23 +147,28 @@ class DeNovoPipeline:
             background_names,
         )
         self._save_bootstrap(records, paths["bootstrap"])
-        match_groups = self._compare_bootstrap_motifs(
-            records, discovery_params, profile_sequences, metric
-        )
-        final_motifs = self._select_final_motifs(
-            match_groups,
-            profile_sequences,
-            promoters,
-            foreground_path,
-            background_path,
-            output_dir,
-            metric,
-        )
-        final_motifs = _select_nonredundant(
-            [(motif.model, motif.metrics[metric], motif) for motif in final_motifs],
-            profile_sequences,
-            self.comparison,
-        )
+        with tempfile.TemporaryDirectory(
+            prefix="profile_cache_", dir=paths["root"]
+        ) as cache_dir:
+            comparison = replace(self.comparison, cache=Cache(cache_dir))
+            match_groups = self._compare_bootstrap_motifs(
+                records, discovery_params, profile_sequences, metric, comparison
+            )
+            final_motifs = self._select_final_motifs(
+                match_groups,
+                profile_sequences,
+                promoters,
+                foreground_path,
+                background_path,
+                output_dir,
+                metric,
+                comparison,
+            )
+            final_motifs = _select_nonredundant(
+                [(motif.model, motif.metrics[metric], motif) for motif in final_motifs],
+                profile_sequences,
+                comparison,
+            )
         self._save_results(final_motifs, paths["motifs"], promoters, metric)
 
     def _prepare_output_dirs(self, output_dir: str) -> dict[str, Path]:
@@ -232,6 +234,7 @@ class DeNovoPipeline:
         discovery_params: dict[str, Iterable[Any]],
         sequences: EncodedSequences,
         metric: str,
+        comparison: ComparisonSettings,
     ) -> list[dict[str, Any]]:
         groups: list[dict[str, Any]] = []
         for params in _iter_param_grid(discovery_params):
@@ -251,7 +254,7 @@ class DeNovoPipeline:
                             for record in split_records
                         ],
                         sequences,
-                        self.comparison,
+                        comparison,
                     )
                 )
             if len(splits) < 2:
@@ -259,15 +262,15 @@ class DeNovoPipeline:
             odd, even = splits
             pairs: list[MatchedPair] = []
             for query in odd:
-                pairs.extend(self.comparison.compare(query, even, sequences))
+                pairs.extend(comparison.compare(query, even, sequences))
             pairs = deduplicate_pairs(
                 sort_pairs(
                     filter_similar(
                         pairs,
-                        self.comparison.criterion,
-                        self.comparison.threshold,
+                        comparison.criterion,
+                        comparison.threshold,
                     ),
-                    self.comparison.criterion,
+                    comparison.criterion,
                 )
             )
             if pairs:
@@ -283,9 +286,10 @@ class DeNovoPipeline:
         background_path: str,
         output_dir: str,
         metric: str,
+        comparison: ComparisonSettings,
     ) -> list[FinalMotif]:
-        criterion = self.comparison.criterion
-        threshold = self.comparison.threshold
+        criterion = comparison.criterion
+        threshold = comparison.threshold
         final: list[FinalMotif] = []
         for group in match_groups:
             params = dict(group["params"])
@@ -310,8 +314,8 @@ class DeNovoPipeline:
                 for index, model in enumerate(full_motifs):
                     if index in assigned:
                         continue
-                    odd = self.comparison.compare(model, [pair.query], sequences)[0]
-                    even = self.comparison.compare(model, [pair.target], sequences)[0]
+                    odd = comparison.compare(model, [pair.query], sequences)[0]
+                    even = comparison.compare(model, [pair.target], sequences)[0]
                     if is_similar(odd, criterion, threshold) and is_similar(
                         even, criterion, threshold
                     ):

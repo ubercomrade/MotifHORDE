@@ -79,6 +79,22 @@ def test_pipeline_fills_default_comparison_threshold():
     assert pipeline.comparison.threshold == pytest.approx(0.9)
 
 
+def test_pipeline_validates_null_bundle_for_any_criterion(pwm_model, sequences):
+    other = replace(pwm_model, name="Other")
+    foreign = build_null(
+        [pwm_model, other], sequences=sequences, n_samples=8, seed=13, search_range=10
+    )
+
+    for criterion in ("score", "p-value"):
+        with pytest.raises(ValueError, match="incompatible"):
+            DeNovoPipeline(
+                FakeDiscovery(pwm_model),
+                PerformanceEvaluator("peaks"),
+                comparison_criterion=criterion,
+                null_distribution=foreign,
+            )
+
+
 def test_pipeline_writes_versioned_bundles_and_refuses_overwrite(tmp_path, pwm_model):
     foreground = tmp_path / "foreground.fa"
     background = tmp_path / "background.fa"
@@ -112,6 +128,7 @@ def test_pipeline_writes_versioned_bundles_and_refuses_overwrite(tmp_path, pwm_m
     assert final_stats["schema_version"] == 1
     assert list((root / "bootstrap" / "models").iterdir())
     assert not list(root.rglob("*.pkl"))
+    assert not list(root.glob("profile_cache_*"))
     for entry in bootstrap_stats["motifs"]:
         assert read_model(root / "bootstrap" / entry["model"]).name == entry["name"]
 

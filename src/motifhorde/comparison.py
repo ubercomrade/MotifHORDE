@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, replace
 from math import isfinite
 from pathlib import Path
@@ -17,6 +18,7 @@ from mimosa import (
     compare_many,
     normalization_fingerprint,
 )
+from mimosa.cache import Cache
 from mimosa.io import read_null_bundle, sequence_fingerprint
 
 PROFILE_METRIC = "jaccard"
@@ -52,6 +54,7 @@ class ComparisonSettings:
     null_distribution: NullDistribution | None = None
     search_range: int = 10
     jobs: int = 1
+    cache: Cache | None = None
 
     def __post_init__(self) -> None:
         if self.criterion not in {"score", "p-value"}:
@@ -75,13 +78,16 @@ class ComparisonSettings:
             jobs=self.jobs,
             null_distribution=self.null_distribution,
             search_range=self.search_range,
+            cache=self.cache,
         )
 
 
+@functools.cache
 def comparison_sequences() -> EncodedSequences:
     """Return the fixed random sequences that all motif comparisons run on.
 
-    The set is deterministic and independent of the input data, so one null
+    The set is built once per process, is deterministic, and is independent of
+    the input data, so one null
     bundle built on it (``mimosa.build_null(..., sequences=comparison_sequences())``)
     fits every run.
     """
@@ -106,7 +112,6 @@ def validate_null_distribution(
     distribution: NullDistribution,
     *,
     search_range: int,
-    sequences=None,
 ) -> None:
     """Check that a null bundle matches this module's public Mimosa call."""
     if not isinstance(distribution, NullDistribution):
@@ -120,6 +125,7 @@ def validate_null_distribution(
         "min_logerr": PROFILE_MIN_LOGERR,
         "normalization_version": expected_normalization,
         "background_fingerprint": "none",
+        "sequence_fingerprint": sequence_fingerprint(comparison_sequences()),
     }
     actual = {
         "metric": distribution.metric,
@@ -128,10 +134,8 @@ def validate_null_distribution(
         "min_logerr": float(contract["min_logerr"]),
         "normalization_version": contract["normalization_version"],
         "background_fingerprint": distribution.background_fingerprint,
+        "sequence_fingerprint": distribution.sequence_fingerprint,
     }
-    if sequences is not None:
-        expected["sequence_fingerprint"] = sequence_fingerprint(sequences)
-        actual["sequence_fingerprint"] = distribution.sequence_fingerprint
     mismatches = [
         f"{key}: expected {expected[key]!r}, got {actual[key]!r}"
         for key in expected
@@ -166,6 +170,7 @@ def compare_records(
     jobs: int,
     null_distribution: NullDistribution | None = None,
     search_range: int = 10,
+    cache: Cache | None = None,
 ) -> list[MatchedPair]:
     """Compare one query against targets in stable target order.
 
@@ -191,6 +196,7 @@ def compare_records(
         search_range=search_range,
         min_logerr=PROFILE_MIN_LOGERR,
         normalization=HybridEmpiricalLogTail(),
+        cache=cache,
         total_threads=jobs,
         inner_threads=1,
     )

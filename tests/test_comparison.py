@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from mimosa import build_null
+from mimosa.cache import Cache
 from mimosa.io import write_null_bundle
 
 from motifhorde.comparison import (
@@ -72,7 +73,7 @@ def _write_null_bundle(tmp_path: Path, pwm_model, sequences, *, search_range=10)
     other = replace(pwm_model, name="Other")
     distribution = build_null(
         [pwm_model, other],
-        sequences=sequences,
+        sequences=comparison_sequences(),
         n_samples=16,
         seed=7,
         search_range=search_range,
@@ -130,10 +131,8 @@ def test_null_bundle_validation_rejects_incompatible_search_range(
     null_distribution = load_null_distribution(path)
 
     with pytest.raises(ValueError, match="incompatible"):
-        validate_null_distribution(
-            null_distribution, search_range=10, sequences=sequences
-        )
-    validate_null_distribution(null_distribution, search_range=9, sequences=sequences)
+        validate_null_distribution(null_distribution, search_range=10)
+    validate_null_distribution(null_distribution, search_range=9)
 
 
 def test_null_bundle_validation_rejects_other_min_logerr(
@@ -141,7 +140,7 @@ def test_null_bundle_validation_rejects_other_min_logerr(
 ):
     distribution = build_null(
         [pwm_model, replace(pwm_model, name="Other")],
-        sequences=sequences,
+        sequences=comparison_sequences(),
         n_samples=16,
         seed=7,
         search_range=10,
@@ -151,9 +150,45 @@ def test_null_bundle_validation_rejects_other_min_logerr(
     write_null_bundle(path, distribution)
 
     with pytest.raises(ValueError, match="min_logerr"):
-        validate_null_distribution(
-            load_null_distribution(path), search_range=10, sequences=sequences
-        )
+        validate_null_distribution(load_null_distribution(path), search_range=10)
+
+
+def test_null_bundle_validation_rejects_other_sequences_and_alignment(
+    tmp_path, pwm_model, sequences
+):
+    models = [pwm_model, replace(pwm_model, name="Other")]
+    other_sequences = build_null(
+        models, sequences=sequences, n_samples=8, seed=7, search_range=10
+    )
+    with pytest.raises(ValueError, match="sequence_fingerprint"):
+        validate_null_distribution(other_sequences, search_range=10)
+
+    path = _write_null_bundle(tmp_path, pwm_model, sequences, search_range=10)
+    distribution = load_null_distribution(path)
+    validate_null_distribution(distribution, search_range=10)
+    foreign = replace(
+        distribution,
+        contract={**distribution.contract, "alignment_version": "other-v9"},
+    )
+    with pytest.raises(ValueError, match="alignment_version"):
+        validate_null_distribution(foreign, search_range=10)
+
+
+def test_cached_comparison_matches_uncached_and_fills_cache(
+    tmp_path, pwm_model, sequences
+):
+    query = _record(pwm_model, "q")
+    targets = [_record(replace(pwm_model, name=f"t{i}"), f"t{i}") for i in range(2)]
+    cache = Cache(tmp_path / "cache")
+    (tmp_path / "cache").mkdir()
+
+    plain = compare_records(query, targets, sequences, jobs=1)
+    first = compare_records(query, targets, sequences, jobs=1, cache=cache)
+    second = compare_records(query, targets, sequences, jobs=1, cache=cache)
+
+    assert any((tmp_path / "cache").iterdir())
+    for a, b, c in zip(plain, first, second, strict=True):
+        assert a.result == b.result == c.result
 
 
 def test_corrupt_null_bundle_is_rejected(tmp_path):
